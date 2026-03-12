@@ -1,9 +1,22 @@
 # Live Trading Tool — Session Handoff
-> Last updated: 2026-03-12
+> Last updated: 2026-03-12 (session 2)
 
 ---
 
 ## WHERE WE LEFT OFF (start here next session)
+
+**2026-03-12 (session 2) — UI: decision boxes, grade gate, confirm banners:**
+- Each checklist phase (1, 2, 3) wrapped in `.decision-box` with `.decision-hdg` centered heading
+- Asset management has its own decision-box; per-asset ✕ Remove button visible at top of each asset box
+- **Grade gate**: trade entry form only renders after MEAN REVERSION or BREAKOUT button is selected
+  - If no grade selected: grey dashed placeholder shown instead of form
+  - `_sel_grade = st.session_state.get("_quick_grade", "")` gates the `with st.form("new_trade_form")`
+- **Pending trade notices**: when WIN/LOSS/BE/Add-on/Edit is pressed on a trade card:
+  - Trade card buttons replaced with orange "⚠ ACTION — confirm below ↓" notice + cancel button
+  - Colour-coded confirm banner appears at top of the outcome form (green WIN / red LOSS / grey BE / orange edit+addon)
+- CSS additions: `.decision-box`, `.decision-hdg`, `.confirm-banner`, `.confirm-win/loss/be/edit/addon`, `.pending-card-notice`, `.grade-gate-msg`
+- Fixed IndentationError: p2 form `with st.form(f"p2_{_ai}"):` was 4 spaces too deep; p2 else block + entire p3 block also fixed; `new_trade_form` body was not indented under `with st.form`
+- Commit: `b0242d9` — pushed to `TruePrimeval/live-trading-tool-private`
 
 **2026-03-12 — Multi-trade support + per-asset Safe Mode checklist + PbD schematics:**
 - `active_trades` list replaces single `active_trade` — multiple simultaneous open trades
@@ -182,7 +195,7 @@ Every 2.5s (autorefresh):
 - Scenario derivation: Within VA → Sc1 (MR) | Between VA abs & VAH/VAL → Sc2 (MR) | Outside VA + returns → Sc3 (MR) | Outside VA + no return → Sc4 (BO)
 - `cl_gate` (1–5): 1=no MRC, 2=no assets, 3=assets incomplete, 5=trading unlocked
 - "Add Asset" button adds assets on-demand (not front-loaded)
-- Per-asset `st.expander` — expanded when incomplete, collapsed when done
+- Per-asset decision-box (replaces `st.expander`) — border colour indicates status
 - Redo buttons on each completed phase
 
 ---
