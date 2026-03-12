@@ -658,6 +658,17 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ─── PASSWORD GATE ────────────────────────────────────────────────────────────
+if not st.session_state.get("_auth"):
+    _pwd = st.text_input("Password", type="password", key="_pwd")
+    if _pwd:
+        if _pwd == st.secrets.get("app", {}).get("password", ""):
+            st.session_state["_auth"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
+
 # ─── CSS ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
