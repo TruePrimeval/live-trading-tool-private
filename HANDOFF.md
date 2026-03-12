@@ -5,6 +5,11 @@
 
 ## WHERE WE LEFT OFF (start here next session)
 
+**⚠ NEXT SESSION — START HERE FIRST:**
+- **"Type of day" UI is not right** — the market day type selection in Phase 2 was better before the decision-box restructure. User says "before was better". Review Phase 2 day type UI and restore/improve it before doing anything else.
+
+---
+
 **2026-03-12 (session 2) — UI: decision boxes, grade gate, confirm banners:**
 - Each checklist phase (1, 2, 3) wrapped in `.decision-box` with `.decision-hdg` centered heading
 - Asset management has its own decision-box; per-asset ✕ Remove button visible at top of each asset box
