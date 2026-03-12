@@ -1,0 +1,16 @@
+# Secrets — never commit
+.streamlit/secrets.toml
+exchange_config.json
+
+# Runtime data files
+session.json
+history.json
+prefs.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
