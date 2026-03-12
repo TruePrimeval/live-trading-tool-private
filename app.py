@@ -953,6 +953,52 @@ h3 { color: #e2e8f0 !important; }
     padding: 14px 20px; color: #f97316; font-weight: 800; font-size: 0.95rem;
     text-align: center; letter-spacing: 0.04em; margin-bottom: 12px;
 }
+
+/* Decision section boxes */
+.decision-box {
+    background: #0a0e18;
+    border: 1px solid #1e2a45;
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin: 14px 0;
+}
+.decision-hdg {
+    text-align: center;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: #94a3b8;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #1a2238;
+}
+
+/* Confirm outcome banners */
+.confirm-banner {
+    border-radius: 10px; padding: 14px 20px; text-align: center;
+    font-size: 1rem; font-weight: 800; letter-spacing: 0.05em; margin: 16px 0 12px;
+}
+.confirm-win  { background: #0a1a0a; border: 2px solid #22c55e; color: #22c55e; }
+.confirm-loss { background: #1a0a0a; border: 2px solid #ef4444; color: #ef4444; }
+.confirm-be   { background: #0e0e1a; border: 2px solid #94a3b8; color: #94a3b8; }
+.confirm-edit { background: #0e1220; border: 2px solid #f97316; color: #f97316; }
+.confirm-addon{ background: #0e0e0a; border: 2px solid #f59e0b; color: #f59e0b; }
+
+/* Pending state on trade card */
+.pending-card-notice {
+    text-align: center; padding: 10px 0 6px;
+    font-size: 0.8rem; font-weight: 700; color: #f97316;
+    letter-spacing: .06em;
+}
+
+/* Grade gate message */
+.grade-gate-msg {
+    text-align: center; padding: 22px 20px;
+    background: #0e1220; border: 1px dashed #1e2a45;
+    border-radius: 10px; color: #4b5a7a;
+    font-size: 0.88rem; font-weight: 600; margin: 12px 0;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1286,11 +1332,13 @@ if safe_mode:
                    "border-radius:10px;padding:16px 18px;"
                    "display:flex;flex-direction:column;align-items:center;text-align:center;gap:5px")
 
-    # ── Phase 1 card ──
+    # ── Phase 1 decision box ──
+    st.markdown('<div class="decision-box">', unsafe_allow_html=True)
+    st.markdown('<div class="decision-hdg">Phase 1 — Human Performance Check-In</div>', unsafe_allow_html=True)
     if cl_phase1:
         _p1_html = (
             f'<div style="{_CARD_STYLE.format(bc="#3b82f6")}">'
-            f'<div class="checklist-badge-done" style="margin:0 auto">✓ Phase 1 — Human Performance</div>'
+            f'<div class="checklist-badge-done" style="margin:0 auto">✓ Morning Report Card Complete</div>'
             f'<div style="{_LBL}">Grade</div>'
             f'<div style="font-size:2.2rem;font-weight:800;line-height:1" class="{_mr_css}">{_mr_g}</div>'
             f'<div style="font-size:0.75rem;color:#94a3b8">{_mr_desc}</div>'
@@ -1298,17 +1346,29 @@ if safe_mode:
             f' · {_limit_line}</div>'
             f'</div>'
         )
+        st.markdown(_p1_html, unsafe_allow_html=True)
+        _p1_rc, _ = st.columns([1, 5])
+        with _p1_rc:
+            if st.button("↩ Redo Check-In", key="redo_p1_sm", use_container_width=True):
+                session["morning_report"] = {**_SESSION_DEFAULTS["morning_report"]}
+                checklist["phase1_complete"] = False
+                checklist["assets"] = []
+                session["checklist"] = checklist
+                _save_session(session)
+                st.rerun()
+        if _mr_g == "F":
+            st.markdown(
+                '<div class="mr-no-trade">MORNING GRADE: F — DO NOT TRADE TODAY · Protect capital.</div>',
+                unsafe_allow_html=True,
+            )
     else:
-        _p1_html = (
+        st.markdown(
             f'<div style="{_CARD_STYLE.format(bc="#3b82f6")}">'
             f'<div class="checklist-badge" style="margin:0 auto">Phase 1 — Human Performance</div>'
-            f'<div style="font-size:0.88rem;color:#4b5a7a;margin-top:8px">○ Complete Morning Report Card to begin</div>'
-            f'</div>'
+            f'<div style="font-size:0.88rem;color:#4b5a7a;margin-top:8px">○ Answer 6 questions to set your daily grade</div>'
+            f'</div>',
+            unsafe_allow_html=True,
         )
-    st.markdown(_p1_html, unsafe_allow_html=True)
-
-    if not cl_phase1:
-        # ── Phase 1 form ──
         with st.form("morning_report_form"):
             qc1, qc2 = st.columns(2)
             for i, (qkey, qlabel, qopts, _) in enumerate(_MR_QUESTIONS):
@@ -1327,29 +1387,12 @@ if safe_mode:
                 }
                 _save_session(session)
                 st.rerun()
-    else:
-        _p1_rc, _ = st.columns([1, 5])
-        with _p1_rc:
-            if st.button("↩ Redo Check-In", key="redo_p1_sm", use_container_width=True):
-                session["morning_report"] = {**_SESSION_DEFAULTS["morning_report"]}
-                checklist["phase1_complete"] = False
-                checklist["assets"] = []
-                session["checklist"] = checklist
-                _save_session(session)
-                st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)  # /decision-box Phase 1
 
-        if _mr_g == "F":
-            st.markdown(
-                '<div class="mr-no-trade">MORNING GRADE: F — DO NOT TRADE TODAY · Protect capital.</div>',
-                unsafe_allow_html=True,
-            )
-
-        # ── Asset management (Phase 2 + Phase 3 per asset) ──
-        st.markdown(
-            '<div style="font-size:0.72rem;font-weight:700;color:#94a3b8;text-transform:uppercase;'
-            'letter-spacing:.1em;margin:14px 0 8px">Assets to Trade Today</div>',
-            unsafe_allow_html=True,
-        )
+    if cl_phase1:
+        # ── Asset management box ──
+        st.markdown('<div class="decision-box">', unsafe_allow_html=True)
+        st.markdown('<div class="decision-hdg">Assets to Trade Today</div>', unsafe_allow_html=True)
         _all_instruments = ["SOL", "BTC", "ETH", "SUI", "MNQ", "MES"]
         _used_names = [a["name"] for a in cl_assets]
         _avail = [x for x in _all_instruments if x not in _used_names]
@@ -1370,182 +1413,200 @@ if safe_mode:
                 '<div class="checklist-lock" style="margin-top:8px">Add at least one asset to begin market analysis.</div>',
                 unsafe_allow_html=True,
             )
+        st.markdown('</div>', unsafe_allow_html=True)  # /decision-box Assets
 
-        # ── Per-asset expanders ──
+        # ── Per-asset boxes ──
         for _ai, _asset in enumerate(cl_assets):
             _aname  = _asset["name"]
             _a_p2c  = _asset.get("phase2_complete", False)
             _a_p3c  = _asset.get("phase3_complete", False)
             _a_ready = _a_p2c and _a_p3c
-            _exp_lbl = f"{'✓' if _a_ready else '○'} {_aname} — {'Ready to trade' if _a_ready else ('Phase 3 pending' if _a_p2c else 'Phase 2 pending')}"
+            _status = "✓ Ready to trade" if _a_ready else ("Phase 3 pending" if _a_p2c else "Phase 2 pending")
+            _border_col = "#22c55e" if _a_ready else ("#3b82f6" if _a_p2c else "#1e2a45")
 
-            with st.expander(_exp_lbl, expanded=not _a_ready):
-                _rc, _ = st.columns([1, 5])
-                with _rc:
-                    if st.button(f"Remove {_aname}", key=f"rm_{_ai}", type="secondary"):
-                        cl_assets.pop(_ai)
+            st.markdown(
+                f'<div class="decision-box" style="border-color:{_border_col}">',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div class="decision-hdg">{_aname} — {_status}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            # Remove asset button
+            _rmcol, _ = st.columns([1, 5])
+            with _rmcol:
+                if st.button(f"✕ Remove {_aname}", key=f"rm_{_ai}", type="secondary"):
+                    cl_assets.pop(_ai)
+                    checklist["assets"] = cl_assets
+                    session["checklist"] = checklist
+                    _save_session(session)
+                    st.rerun()
+
+            # ── Phase 2 ──
+            st.markdown('<div class="decision-box" style="margin:8px 0">', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="decision-hdg">Phase 2 — Market Context · {_aname}'
+                f'<br><span style="font-size:0.62rem;font-weight:500;letter-spacing:0;'
+                f'text-transform:none;color:#4b5a7a">Based on PREVIOUS day\'s profile</span></div>',
+                unsafe_allow_html=True,
+            )
+            if not _a_p2c:
+                with st.form(f"p2_{_ai}"):
+                    _fc1, _fc2 = st.columns(2)
+                    with _fc1:
+                        _p2_state = st.selectbox("Previous day type", _MARKET_STATES, key=f"p2s_{_ai}")
+                        _p2_d = st.radio("Volume 'D' profile on 30M?", ["Yes", "No"], key=f"p2d_{_ai}", horizontal=True)
+                        _p2_ib = st.radio("Initial Balance size", ["Large", "Small"], key=f"p2ib_{_ai}", horizontal=True)
+                    with _fc2:
+                        _p2_loc = st.radio("Price location vs prev day VA", _PRICE_LOCATIONS, key=f"p2l_{_ai}")
+                        if st.session_state.get(f"p2l_{_ai}", "") == "Outside VA":
+                            _p2_ret_raw = st.radio(
+                                "Price returned to VAH/VAL and resided 15–30 min?",
+                                ["Yes", "No"], key=f"p2r_{_ai}", horizontal=True,
+                            )
+                            _p2_ret = _p2_ret_raw == "Yes"
+                        else:
+                            _p2_ret = False
+
+                    # Live scenario preview
+                    _loc_now = st.session_state.get(f"p2l_{_ai}", _PRICE_LOCATIONS[0])
+                    _ret_now = st.session_state.get(f"p2r_{_ai}", "No") == "Yes" if _loc_now == "Outside VA" else False
+                    _sc_now, _st_now = _derive_scenario(_loc_now, _ret_now)
+                    _sc_col = "#22c55e" if _st_now == "Mean Reversion" else "#f97316"
+                    st.markdown(
+                        f'<div style="padding:8px 0 4px">'
+                        f'<span style="font-size:0.6rem;color:#4b5a7a;text-transform:uppercase;'
+                        f'letter-spacing:.08em;font-weight:600">→ Scenario {_sc_now} · Strategy: </span>'
+                        f'<span style="font-size:1.1rem;font-weight:900;color:{_sc_col}">{_st_now.upper()}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # Schematics
+                    _ms_now = st.session_state.get(f"p2s_{_ai}", _MARKET_STATES[0])
+                    _sch1 = _schematic_for_market_state(_ms_now)
+                    _im_c1, _im_c2 = st.columns(2)
+                    if _sch1 and os.path.exists(_sch1):
+                        with _im_c1:
+                            st.image(_sch1, caption="Day type reference", use_container_width=True)
+                    if os.path.exists(_SCENARIO_SCHEMATIC):
+                        with _im_c2:
+                            st.image(_SCENARIO_SCHEMATIC, caption="Trade scenarios", use_container_width=True)
+
+                    if st.form_submit_button(f"Confirm Phase 2 for {_aname} →", use_container_width=True):
+                        _loc_s = st.session_state.get(f"p2l_{_ai}", _PRICE_LOCATIONS[0])
+                        _ret_s = st.session_state.get(f"p2r_{_ai}", "No") == "Yes" if _loc_s == "Outside VA" else False
+                        _sc_f, _st_f = _derive_scenario(_loc_s, _ret_s)
+                        cl_assets[_ai]["phase2"] = {
+                            "market_state":      st.session_state.get(f"p2s_{_ai}", _MARKET_STATES[0]),
+                            "d_profile":         st.session_state.get(f"p2d_{_ai}", "Yes"),
+                            "ib_size":           st.session_state.get(f"p2ib_{_ai}", "Large"),
+                            "price_location":    _loc_s,
+                            "outside_va_return": _ret_s,
+                            "scenario":          _sc_f,
+                            "strategy":          _st_f,
+                        }
+                        cl_assets[_ai]["phase2_complete"] = True
                         checklist["assets"] = cl_assets
                         session["checklist"] = checklist
                         _save_session(session)
                         st.rerun()
+            else:
+                _p2d = _asset.get("phase2", {})
+                _s_c = "#22c55e" if _p2d.get("strategy") == "Mean Reversion" else "#f97316"
+                st.markdown(
+                    f'<div class="checklist-badge-done" style="display:inline-block;margin:4px 0 6px">'
+                    f'✓ Phase 2 — {_aname}</div><br>'
+                    f'<span style="font-size:0.75rem;color:#94a3b8">'
+                    f'Day: <strong>{_p2d.get("market_state","?")}</strong> · '
+                    f'Loc: <strong>{_p2d.get("price_location","?")}</strong> · '
+                    f'Scenario <strong>{_p2d.get("scenario","?")}</strong> · '
+                    f'Strategy: <strong style="color:{_s_c}">{_p2d.get("strategy","?")}</strong>'
+                    f'</span>',
+                    unsafe_allow_html=True,
+                )
+                if st.button(f"↩ Redo Phase 2 — {_aname}", key=f"rdop2_{_ai}", type="secondary"):
+                    cl_assets[_ai]["phase2"] = {}
+                    cl_assets[_ai]["phase2_complete"] = False
+                    cl_assets[_ai]["phase3_complete"] = False
+                    checklist["assets"] = cl_assets
+                    session["checklist"] = checklist
+                    _save_session(session)
+                    st.rerun()
 
-                # ── Phase 2 ──
-                if not _a_p2c:
-                    st.markdown(
-                        f'<div class="checklist-badge" style="display:inline-block;margin:4px 0 8px">'
-                        f'Phase 2 — Market Context: {_aname} (based on PREVIOUS day profile)</div>',
-                        unsafe_allow_html=True,
-                    )
-                    with st.form(f"p2_{_ai}"):
-                        _fc1, _fc2 = st.columns(2)
-                        with _fc1:
-                            _p2_state = st.selectbox("Previous day type", _MARKET_STATES, key=f"p2s_{_ai}")
-                            _p2_d = st.radio("Volume 'D' profile on 30M?", ["Yes", "No"], key=f"p2d_{_ai}", horizontal=True)
-                            _p2_ib = st.radio("Initial Balance size", ["Large", "Small"], key=f"p2ib_{_ai}", horizontal=True)
-                        with _fc2:
-                            _p2_loc = st.radio("Price location vs prev day VA", _PRICE_LOCATIONS, key=f"p2l_{_ai}")
-                            if st.session_state.get(f"p2l_{_ai}", "") == "Outside VA":
-                                _p2_ret_raw = st.radio(
-                                    "Price returned to VAH/VAL and resided 15–30 min?",
-                                    ["Yes", "No"], key=f"p2r_{_ai}", horizontal=True,
-                                )
-                                _p2_ret = _p2_ret_raw == "Yes"
+            st.markdown('</div>', unsafe_allow_html=True)  # /decision-box Phase 2
+
+            # ── Phase 3 ──
+            if _a_p2c:
+                st.markdown('<div class="decision-box" style="margin:8px 0">', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="decision-hdg">Phase 3 — Key Levels · {_aname}</div>',
+                    unsafe_allow_html=True,
+                )
+                if not _a_p3c:
+                    with st.form(f"p3_{_ai}"):
+                        st.checkbox(f"Key S/R levels marked for {_aname}", key=f"p3sr_{_ai}")
+                        st.checkbox(f"Trend lines drawn for {_aname}", key=f"p3tl_{_ai}")
+                        st.checkbox(f"Price alerts set for {_aname}", key=f"p3al_{_ai}")
+
+                        # News events — shared, shown only until checked
+                        _news = checklist.get("news", {})
+                        if not _news.get("checked"):
+                            st.markdown('<hr style="border-color:#1a2238;margin:10px 0">', unsafe_allow_html=True)
+                            st.markdown(
+                                '<div style="font-size:0.62rem;color:#4b5a7a;text-transform:uppercase;'
+                                'letter-spacing:.1em;font-weight:600;margin-bottom:6px">'
+                                'News Events (shared — all assets)</div>',
+                                unsafe_allow_html=True,
+                            )
+                            st.radio("Major news event today?", ["No", "Yes"], key=f"news_yn_{_ai}", horizontal=True)
+                            if st.session_state.get(f"news_yn_{_ai}", "No") == "Yes":
+                                _nc1, _nc2 = st.columns(2)
+                                with _nc1:
+                                    st.text_input("Event name", placeholder="e.g. CPI, FOMC", key=f"news_nm_{_ai}")
+                                with _nc2:
+                                    st.text_input("Time (EST)", placeholder="e.g. 08:30", key=f"news_tm_{_ai}")
+
+                        if st.form_submit_button(f"Confirm Phase 3 for {_aname} →", use_container_width=True):
+                            if not (st.session_state.get(f"p3sr_{_ai}") and
+                                    st.session_state.get(f"p3tl_{_ai}") and
+                                    st.session_state.get(f"p3al_{_ai}")):
+                                st.error("Check all three S/R items to proceed.")
                             else:
-                                _p2_ret = False
-
-                        # Live scenario preview
-                        _loc_now = st.session_state.get(f"p2l_{_ai}", _PRICE_LOCATIONS[0])
-                        _ret_now = st.session_state.get(f"p2r_{_ai}", "No") == "Yes" if _loc_now == "Outside VA" else False
-                        _sc_now, _st_now = _derive_scenario(_loc_now, _ret_now)
-                        _sc_col = "#22c55e" if _st_now == "Mean Reversion" else "#f97316"
-                        st.markdown(
-                            f'<div style="padding:8px 0 4px">'
-                            f'<span style="font-size:0.6rem;color:#4b5a7a;text-transform:uppercase;'
-                            f'letter-spacing:.08em;font-weight:600">→ Scenario {_sc_now} · Strategy: </span>'
-                            f'<span style="font-size:1.1rem;font-weight:900;color:{_sc_col}">{_st_now.upper()}</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                        # Schematics
-                        _ms_now = st.session_state.get(f"p2s_{_ai}", _MARKET_STATES[0])
-                        _sch1 = _schematic_for_market_state(_ms_now)
-                        _im_c1, _im_c2 = st.columns(2)
-                        if _sch1 and os.path.exists(_sch1):
-                            with _im_c1:
-                                st.image(_sch1, caption="Day type reference", use_container_width=True)
-                        if os.path.exists(_SCENARIO_SCHEMATIC):
-                            with _im_c2:
-                                st.image(_SCENARIO_SCHEMATIC, caption="Trade scenarios", use_container_width=True)
-
-                        if st.form_submit_button(f"Confirm Phase 2 for {_aname} →", use_container_width=True):
-                            _loc_s = st.session_state.get(f"p2l_{_ai}", _PRICE_LOCATIONS[0])
-                            _ret_s = st.session_state.get(f"p2r_{_ai}", "No") == "Yes" if _loc_s == "Outside VA" else False
-                            _sc_f, _st_f = _derive_scenario(_loc_s, _ret_s)
-                            cl_assets[_ai]["phase2"] = {
-                                "market_state":      st.session_state.get(f"p2s_{_ai}", _MARKET_STATES[0]),
-                                "d_profile":         st.session_state.get(f"p2d_{_ai}", "Yes"),
-                                "ib_size":           st.session_state.get(f"p2ib_{_ai}", "Large"),
-                                "price_location":    _loc_s,
-                                "outside_va_return": _ret_s,
-                                "scenario":          _sc_f,
-                                "strategy":          _st_f,
-                            }
-                            cl_assets[_ai]["phase2_complete"] = True
-                            checklist["assets"] = cl_assets
-                            session["checklist"] = checklist
-                            _save_session(session)
-                            st.rerun()
+                                cl_assets[_ai]["phase3"] = {"sr_levels": True, "trend_lines": True, "price_alerts": True}
+                                cl_assets[_ai]["phase3_complete"] = True
+                                checklist["assets"] = cl_assets
+                                _news_now = checklist.get("news", {})
+                                if not _news_now.get("checked"):
+                                    _hn = st.session_state.get(f"news_yn_{_ai}", "No") == "Yes"
+                                    checklist["news"] = {
+                                        "checked":    True,
+                                        "has_news":   _hn,
+                                        "event_name": st.session_state.get(f"news_nm_{_ai}", "") if _hn else "",
+                                        "event_time": st.session_state.get(f"news_tm_{_ai}", "") if _hn else "",
+                                    }
+                                    cl_news_done = True
+                                session["checklist"] = checklist
+                                _save_session(session)
+                                st.rerun()
                 else:
-                    _p2d = _asset.get("phase2", {})
-                    _s_c = "#22c55e" if _p2d.get("strategy") == "Mean Reversion" else "#f97316"
                     st.markdown(
-                        f'<div class="checklist-badge-done" style="display:inline-block;margin:4px 0 6px">'
-                        f'✓ Phase 2 — {_aname}</div><br>'
-                        f'<span style="font-size:0.75rem;color:#94a3b8">'
-                        f'Day: <strong>{_p2d.get("market_state","?")}</strong> · '
-                        f'Loc: <strong>{_p2d.get("price_location","?")}</strong> · '
-                        f'Scenario <strong>{_p2d.get("scenario","?")}</strong> · '
-                        f'Strategy: <strong style="color:{_s_c}">{_p2d.get("strategy","?")}</strong>'
-                        f'</span>',
+                        f'<div class="checklist-badge-done" style="display:inline-block;margin-bottom:6px">'
+                        f'✓ Phase 3 — {_aname}</div><br>'
+                        f'<span style="font-size:0.75rem;color:#94a3b8">✓ S/R levels · ✓ Trend lines · ✓ Price alerts</span>',
                         unsafe_allow_html=True,
                     )
-                    if st.button(f"↩ Redo Phase 2 — {_aname}", key=f"rdop2_{_ai}", type="secondary"):
-                        cl_assets[_ai]["phase2"] = {}
-                        cl_assets[_ai]["phase2_complete"] = False
+                    if st.button(f"↩ Redo Phase 3 — {_aname}", key=f"rdop3_{_ai}", type="secondary"):
                         cl_assets[_ai]["phase3_complete"] = False
                         checklist["assets"] = cl_assets
                         session["checklist"] = checklist
                         _save_session(session)
                         st.rerun()
 
-                # ── Phase 3 ──
-                if _a_p2c:
-                    st.markdown('<hr style="border-color:#1a2238;margin:12px 0">', unsafe_allow_html=True)
-                    if not _a_p3c:
-                        st.markdown(
-                            f'<div class="checklist-badge" style="display:inline-block;margin-bottom:8px">'
-                            f'Phase 3 — Key Levels: {_aname}</div>',
-                            unsafe_allow_html=True,
-                        )
-                        with st.form(f"p3_{_ai}"):
-                            st.checkbox(f"Key S/R levels marked for {_aname}", key=f"p3sr_{_ai}")
-                            st.checkbox(f"Trend lines drawn for {_aname}", key=f"p3tl_{_ai}")
-                            st.checkbox(f"Price alerts set for {_aname}", key=f"p3al_{_ai}")
+                st.markdown('</div>', unsafe_allow_html=True)  # /decision-box Phase 3
 
-                            # News events — shared, shown only until checked
-                            _news = checklist.get("news", {})
-                            if not _news.get("checked"):
-                                st.markdown('<hr style="border-color:#1a2238;margin:10px 0">', unsafe_allow_html=True)
-                                st.markdown(
-                                    '<div style="font-size:0.62rem;color:#4b5a7a;text-transform:uppercase;'
-                                    'letter-spacing:.1em;font-weight:600;margin-bottom:6px">'
-                                    'News Events (shared — all assets)</div>',
-                                    unsafe_allow_html=True,
-                                )
-                                st.radio("Major news event today?", ["No", "Yes"], key=f"news_yn_{_ai}", horizontal=True)
-                                if st.session_state.get(f"news_yn_{_ai}", "No") == "Yes":
-                                    _nc1, _nc2 = st.columns(2)
-                                    with _nc1:
-                                        st.text_input("Event name", placeholder="e.g. CPI, FOMC", key=f"news_nm_{_ai}")
-                                    with _nc2:
-                                        st.text_input("Time (EST)", placeholder="e.g. 08:30", key=f"news_tm_{_ai}")
-
-                            if st.form_submit_button(f"Confirm Phase 3 for {_aname} →", use_container_width=True):
-                                if not (st.session_state.get(f"p3sr_{_ai}") and
-                                        st.session_state.get(f"p3tl_{_ai}") and
-                                        st.session_state.get(f"p3al_{_ai}")):
-                                    st.error("Check all three S/R items to proceed.")
-                                else:
-                                    cl_assets[_ai]["phase3"] = {"sr_levels": True, "trend_lines": True, "price_alerts": True}
-                                    cl_assets[_ai]["phase3_complete"] = True
-                                    checklist["assets"] = cl_assets
-                                    _news_now = checklist.get("news", {})
-                                    if not _news_now.get("checked"):
-                                        _hn = st.session_state.get(f"news_yn_{_ai}", "No") == "Yes"
-                                        checklist["news"] = {
-                                            "checked":    True,
-                                            "has_news":   _hn,
-                                            "event_name": st.session_state.get(f"news_nm_{_ai}", "") if _hn else "",
-                                            "event_time": st.session_state.get(f"news_tm_{_ai}", "") if _hn else "",
-                                        }
-                                        cl_news_done = True
-                                    session["checklist"] = checklist
-                                    _save_session(session)
-                                    st.rerun()
-                    else:
-                        st.markdown(
-                            f'<div class="checklist-badge-done" style="display:inline-block;margin-bottom:6px">'
-                            f'✓ Phase 3 — {_aname}</div><br>'
-                            f'<span style="font-size:0.75rem;color:#94a3b8">✓ S/R levels · ✓ Trend lines · ✓ Price alerts</span>',
-                            unsafe_allow_html=True,
-                        )
-                        if st.button(f"↩ Redo Phase 3 — {_aname}", key=f"rdop3_{_ai}", type="secondary"):
-                            cl_assets[_ai]["phase3_complete"] = False
-                            checklist["assets"] = cl_assets
-                            session["checklist"] = checklist
-                            _save_session(session)
-                            st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)  # /decision-box per-asset
 
         # ── News event warning banner ──
         _news_data = checklist.get("news", {})
@@ -2023,51 +2084,80 @@ if active_trades:
             </div>
             """, unsafe_allow_html=True)
 
-            # Action buttons — each trade has unique keys
-            _btn_cols = st.columns([2,2,2,2,2,1])
-            with _btn_cols[0]:
-                if st.button("WIN",  key=f"win_{_ti}",  use_container_width=True, type="primary"):
-                    st.session_state["_outcome_pending"] = {"idx": _ti, "type": "win"}
+            # If this trade has a pending action, show notice instead of buttons
+            _this_pending = _op and isinstance(_op, dict) and _op.get("idx") == _ti
+            if _this_pending:
+                _pend_labels = {"win": "✅ WIN", "loss": "❌ LOSS", "be": "⚪ BE",
+                                "addon": "➕ ADD-ON", "edit": "✏️ EDIT"}
+                _pl = _pend_labels.get(_op.get("type",""), "ACTION")
+                st.markdown(
+                    f'<div class="pending-card-notice">⚠ {_pl} — confirm in the form below ↓</div>',
+                    unsafe_allow_html=True,
+                )
+                if st.button("✕ Cancel", key=f"cancel_pend_{_ti}", type="secondary", use_container_width=True):
+                    del st.session_state["_outcome_pending"]
                     st.rerun()
-            with _btn_cols[1]:
-                if st.button("LOSS", key=f"loss_{_ti}", use_container_width=True):
-                    st.session_state["_outcome_pending"] = {"idx": _ti, "type": "loss"}
-                    st.rerun()
-            with _btn_cols[2]:
-                if st.button("BE",   key=f"be_{_ti}",   use_container_width=True):
-                    st.session_state["_outcome_pending"] = {"idx": _ti, "type": "be"}
-                    st.rerun()
-            with _btn_cols[3]:
-                if st.button(f"+{prefs['addon_r']}R", key=f"add_{_ti}", use_container_width=True):
-                    st.session_state["_outcome_pending"] = {"idx": _ti, "type": "addon"}
-                    st.rerun()
-            with _btn_cols[4]:
-                if st.button("Edit", key=f"edit_{_ti}", use_container_width=True):
-                    st.session_state["_outcome_pending"] = {"idx": _ti, "type": "edit"}
-                    st.rerun()
-            with _btn_cols[5]:
-                if st.button("✕", key=f"cancel_{_ti}", use_container_width=True, help="Cancel trade"):
-                    active_trades.pop(_ti)
-                    session["active_trades"] = active_trades
-                    _save_session(session)
-                    st.rerun()
+            else:
+                # Normal action buttons
+                _btn_cols = st.columns([2,2,2,2,2,1])
+                with _btn_cols[0]:
+                    if st.button("WIN",  key=f"win_{_ti}",  use_container_width=True, type="primary"):
+                        st.session_state["_outcome_pending"] = {"idx": _ti, "type": "win"}
+                        st.rerun()
+                with _btn_cols[1]:
+                    if st.button("LOSS", key=f"loss_{_ti}", use_container_width=True):
+                        st.session_state["_outcome_pending"] = {"idx": _ti, "type": "loss"}
+                        st.rerun()
+                with _btn_cols[2]:
+                    if st.button("BE",   key=f"be_{_ti}",   use_container_width=True):
+                        st.session_state["_outcome_pending"] = {"idx": _ti, "type": "be"}
+                        st.rerun()
+                with _btn_cols[3]:
+                    if st.button(f"+{prefs['addon_r']}R", key=f"add_{_ti}", use_container_width=True):
+                        st.session_state["_outcome_pending"] = {"idx": _ti, "type": "addon"}
+                        st.rerun()
+                with _btn_cols[4]:
+                    if st.button("Edit", key=f"edit_{_ti}", use_container_width=True):
+                        st.session_state["_outcome_pending"] = {"idx": _ti, "type": "edit"}
+                        st.rerun()
+                with _btn_cols[5]:
+                    if st.button("✕", key=f"cancel_{_ti}", use_container_width=True, help="Cancel trade"):
+                        active_trades.pop(_ti)
+                        session["active_trades"] = active_trades
+                        _save_session(session)
+                        st.rerun()
 
-            # EV chart — show when this trade is the one with pending action, or if only one trade
-            if (not _op or (_op and _op.get("idx") == _ti)) and len(active_trades) == 1:
+            # EV chart — show when no pending action, single trade only
+            if not _op and len(active_trades) == 1:
                 _draw_ev_chart(_t_winp, _t_rr, f"{_t_grade} — {_t_inst or 'trade'}")
 
-# ── Outcome forms — shown for whichever trade has a pending action ──
+# ── Outcome forms — prominent banner + form ──
 if _op and isinstance(_op, dict):
     _op_idx  = _op.get("idx", 0)
     _op_type = _op.get("type", "")
     if _op_idx < len(active_trades):
         _act = active_trades[_op_idx]
+        _act_inst   = _act.get("instrument", "Trade")
         _act_rr     = _act["rr_target"]
         _act_risk_r = _act["implied_r"] + sum(a["r"] for a in _act.get("add_ons", []))
 
+        # Prominent confirm banner
+        _banner_map = {
+            "win":   ("confirm-banner confirm-win",  "✅  CONFIRM WIN"),
+            "loss":  ("confirm-banner confirm-loss", "❌  CONFIRM LOSS"),
+            "be":    ("confirm-banner confirm-be",   "⚪  CONFIRM BREAK EVEN"),
+            "edit":  ("confirm-banner confirm-edit", "✏️  EDIT TRADE"),
+            "addon": ("confirm-banner confirm-addon","➕  ADD ON"),
+        }
+        _bcls, _blbl = _banner_map.get(_op_type, ("confirm-banner confirm-edit", "ACTION REQUIRED"))
+        st.markdown(
+            f'<div class="{_bcls}">{_blbl} — {_act_inst}</div>',
+            unsafe_allow_html=True,
+        )
+
         if _op_type == "edit":
             with st.form(f"edit_form_{_op_idx}"):
-                st.markdown(f"**Edit — {_act.get('instrument', 'Trade')}**")
+                st.markdown(f"**Edit — {_act_inst}**")
                 ec1, ec2, ec3 = st.columns([2, 2, 3])
                 with ec1:
                     _go_e = list(prefs["grades"].keys())
@@ -2091,7 +2181,7 @@ if _op and isinstance(_op, dict):
 
         elif _op_type == "win":
             with st.form(f"win_form_{_op_idx}"):
-                st.markdown(f"**Win — {_act.get('instrument','Trade')} — Enter R:R achieved:**")
+                st.markdown(f"**Enter R:R achieved for {_act_inst}:**")
                 wc1, wc2 = st.columns([3, 2])
                 with wc1:
                     rr_achieved = st.number_input("R:R achieved", min_value=0.0,
@@ -2127,7 +2217,7 @@ if _op and isinstance(_op, dict):
             _is_okx_l = _ex_cfg_l.get("exchange", "OKX") == "OKX"
             _pull_lbl = "Pull from API" if _is_okx_l else f"Pull from {_ex_cfg_l.get('exchange','API')}"
             with st.form(f"loss_form_{_op_idx}"):
-                st.markdown(f"**Loss — {_act.get('instrument','Trade')} — confirm R lost:**")
+                st.markdown(f"**Confirm R lost on {_act_inst}:**")
                 lc1, lc2, lc3 = st.columns([2, 2, 2])
                 with lc1:
                     manual_r = st.number_input("Actual R (negative)", max_value=0.0,
@@ -2186,7 +2276,7 @@ if _op and isinstance(_op, dict):
 
         elif _op_type == "be":
             with st.form(f"be_form_{_op_idx}"):
-                st.markdown(f"**Break Even — {_act.get('instrument','Trade')} — log at 0R?**")
+                st.markdown(f"**Log {_act_inst} at 0R?**")
                 if st.form_submit_button("Confirm Break Even", use_container_width=True):
                     _cr = _risk_score(_act["rr_target"], len(_act.get("add_ons",[])), _act.get("grade","AA"))
                     _t3 = {**_act, "outcome": "BE", "close_time": datetime.now().strftime("%H:%M:%S"),
@@ -2202,7 +2292,7 @@ if _op and isinstance(_op, dict):
 
         elif _op_type == "addon":
             with st.form(f"addon_form_{_op_idx}"):
-                st.markdown(f"**Add {prefs['addon_r']}R to {_act.get('instrument','trade')}?**")
+                st.markdown(f"**Add {prefs['addon_r']}R to {_act_inst}?**")
                 new_rr = st.number_input("Update R:R target", min_value=0.1,
                                          value=float(_act_rr), step=0.1, format="%.1f")
                 if st.form_submit_button("Confirm Add-on", use_container_width=True):
@@ -2216,11 +2306,6 @@ if _op and isinstance(_op, dict):
                     _save_session(session)
                     st.rerun()
 
-    # Cancel button
-    if st.button("Cancel action", key="cancel_pending"):
-        del st.session_state["_outcome_pending"]
-        st.rerun()
-
 # ── New trade form ──
 if not limit_hit:
     if safe_mode and cl_gate < 5:
@@ -2229,7 +2314,7 @@ if not limit_hit:
             unsafe_allow_html=True,
         )
     else:
-        # Quick-launch buttons
+        # Quick-launch buttons — must select before form unlocks
         _sel_grade = st.session_state.get("_quick_grade", "")
         qb1, qb2 = st.columns(2)
         with qb1:
@@ -2245,129 +2330,136 @@ if not limit_hit:
                 st.session_state["_quick_grade"] = "AA"
                 st.rerun()
 
-        # WS prefill banner
+        # Grade gate — must select MEAN REVERSION or BREAKOUT first
         _pf = st.session_state.get("_ws_prefill") or {}
-        if _pf:
+
+        if not _sel_grade:
             st.markdown(
-                f'<div class="info-banner">⚡ OKX fill detected — {_pf.get("instrument","?")} entry @ {_pf.get("entry_px","?")} · '
-                f'SL {_pf.get("sl_px","?")} · TP {_pf.get("tp_px","?")} · '
-                f'{"R:R " + str(_pf.get("rr")) if _pf.get("rr") else "No TP — enter R:R manually"}'
-                f'<br>Select grade + confirm to log.</div>',
+                '<div class="grade-gate-msg">👆 Select MEAN REVERSION or BREAKOUT above to unlock trade entry</div>',
                 unsafe_allow_html=True,
             )
+        else:
+            if _pf:
+                st.markdown(
+                    f'<div class="info-banner">⚡ OKX fill detected — {_pf.get("instrument","?")} entry @ {_pf.get("entry_px","?")} · '
+                    f'SL {_pf.get("sl_px","?")} · TP {_pf.get("tp_px","?")} · '
+                    f'{"R:R " + str(_pf.get("rr")) if _pf.get("rr") else "No TP — enter R:R manually"}'
+                    f'<br>Select grade + confirm to log.</div>',
+                    unsafe_allow_html=True,
+                )
 
-        with st.form("new_trade_form", clear_on_submit=True):
-            _default_rr   = float(_pf.get("rr") or 3.0)
-            fr1, fr2, fr3 = st.columns([1, 2, 3])
-            with fr1:
-                rr_target = st.number_input("R:R", min_value=0.1, max_value=50.0,
-                                            value=_default_rr, step=0.1, format="%.1f")
-            with fr2:
-                _go2     = list(prefs["grades"].keys())
-                _gl2     = [f"{k} ({prefs['grades'][k]['implied_r']}R)" for k in _go2]
-                _dg2     = st.session_state.get("_quick_grade", "AA")
-                _di2     = _go2.index(_dg2) if _dg2 in _go2 else 0
-                _gsel    = st.selectbox("Grade", _gl2, index=_di2)
-                chosen_grade = _go2[_gl2.index(_gsel)]
-            with fr3:
-                note = st.text_input("Note", placeholder="Setup / reason for entry")
+            with st.form("new_trade_form", clear_on_submit=True):
+                _default_rr   = float(_pf.get("rr") or 3.0)
+                fr1, fr2, fr3 = st.columns([1, 2, 3])
+                with fr1:
+                    rr_target = st.number_input("R:R", min_value=0.1, max_value=50.0,
+                                                value=_default_rr, step=0.1, format="%.1f")
+                with fr2:
+                    _go2     = list(prefs["grades"].keys())
+                    _gl2     = [f"{k} ({prefs['grades'][k]['implied_r']}R)" for k in _go2]
+                    _dg2     = st.session_state.get("_quick_grade", "AA")
+                    _di2     = _go2.index(_dg2) if _dg2 in _go2 else 0
+                    _gsel    = st.selectbox("Grade", _gl2, index=_di2)
+                    chosen_grade = _go2[_gl2.index(_gsel)]
+                with fr3:
+                    note = st.text_input("Note", placeholder="Setup / reason for entry")
 
-            _instruments = ["SOL", "BTC", "ETH", "SUI", "MNQ", "MES"]
-            _futures     = {"MNQ": 2.0, "MES": 5.0}
-            _pf_ii = _instruments.index(_pf.get("instrument","SOL")) if _pf.get("instrument") in _instruments else 0
-            fi1, fi2, fi3, fi4 = st.columns([1.5, 2, 2, 2])
-            with fi1:
-                instrument = st.selectbox("Instrument", _instruments, index=_pf_ii)
-            with fi2:
-                entry_price = st.number_input("Entry Price", min_value=0.0,
-                                              value=float(_pf.get("entry_px") or 0.0),
-                                              step=0.01, format="%.4f")
-            with fi3:
-                stop_price  = st.number_input("Stop Price", min_value=0.0,
-                                              value=float(_pf.get("sl_px") or 0.0),
-                                              step=0.01, format="%.4f")
-            with fi4:
-                _risk_usd = one_r * prefs["grades"][chosen_grade]["implied_r"]
-                _diff     = abs(entry_price - stop_price)
-                if entry_price > 0 and stop_price > 0 and _diff > 0:
-                    _qty_lbl = (f"{_risk_usd/(_diff*_futures[instrument]):.3f} lots"
-                                if instrument in _futures
-                                else f"{_risk_usd/_diff:.4f}")
-                    st.markdown(
-                        f"<div style='margin-top:28px'>"
-                        f"<div style='font-size:0.58rem;color:#4b5a7a;text-transform:uppercase;"
-                        f"letter-spacing:.1em;font-weight:600;margin-bottom:4px'>Qty</div>"
-                        f"<div style='font-size:1.1rem;font-weight:700;color:#f97316'>{_qty_lbl}</div>"
-                        f"<div style='font-size:0.65rem;color:#4b5a7a'>Risk ${_risk_usd:,.2f}</div></div>",
-                        unsafe_allow_html=True)
-                else:
-                    st.markdown("<div style='margin-top:28px;font-size:0.75rem;color:#4b5a7a'>"
-                                "Enter entry &amp; stop for qty</div>", unsafe_allow_html=True)
-
-            # ── Inline Phase 4 gate (safe mode only) ──
-            _p4_ok = True
-            if safe_mode:
-                _inst_now = st.session_state.get("Instrument", instrument)
-                _asset_match = next((a for a in cl_assets if a["name"] == _inst_now and
-                                     a.get("phase2_complete") and a.get("phase3_complete")), None)
-                if _asset_match:
-                    _p4_strat = _asset_match["phase2"].get("strategy", "Mean Reversion")
-                    _p4_sc    = "#22c55e" if _p4_strat == "Mean Reversion" else "#f97316"
-                    st.markdown(
-                        f'<div style="padding:10px 0 6px;font-size:0.62rem;color:#4b5a7a;text-transform:uppercase;'
-                        f'letter-spacing:.1em;font-weight:600">Phase 4 — Pre-Trade Gate · '
-                        f'<span style="color:{_p4_sc}">{_p4_strat.upper()}</span></div>',
-                        unsafe_allow_html=True,
-                    )
-                    _p4c1, _p4c2 = st.columns(2)
-                    with _p4c1:
-                        _p4_level = st.radio("At a valid S/R level?", ["Yes", "No — not yet"], key="p4_lvl")
-                    with _p4c2:
-                        _p4_fp    = st.radio("Footprint confirms?", ["Yes", "No — wait"], key="p4_fp")
-                    if _p4_strat == "Breakout":
-                        _p4_bo = st.radio("Breakout confirmed with order activity?",
-                                          ["Yes", "No — false breakout", "N/A"], key="p4_bo")
+                _instruments = ["SOL", "BTC", "ETH", "SUI", "MNQ", "MES"]
+                _futures     = {"MNQ": 2.0, "MES": 5.0}
+                _pf_ii = _instruments.index(_pf.get("instrument","SOL")) if _pf.get("instrument") in _instruments else 0
+                fi1, fi2, fi3, fi4 = st.columns([1.5, 2, 2, 2])
+                with fi1:
+                    instrument = st.selectbox("Instrument", _instruments, index=_pf_ii)
+                with fi2:
+                    entry_price = st.number_input("Entry Price", min_value=0.0,
+                                                  value=float(_pf.get("entry_px") or 0.0),
+                                                  step=0.01, format="%.4f")
+                with fi3:
+                    stop_price  = st.number_input("Stop Price", min_value=0.0,
+                                                  value=float(_pf.get("sl_px") or 0.0),
+                                                  step=0.01, format="%.4f")
+                with fi4:
+                    _risk_usd = one_r * prefs["grades"][chosen_grade]["implied_r"]
+                    _diff     = abs(entry_price - stop_price)
+                    if entry_price > 0 and stop_price > 0 and _diff > 0:
+                        _qty_lbl = (f"{_risk_usd/(_diff*_futures[instrument]):.3f} lots"
+                                    if instrument in _futures
+                                    else f"{_risk_usd/_diff:.4f}")
+                        st.markdown(
+                            f"<div style='margin-top:28px'>"
+                            f"<div style='font-size:0.58rem;color:#4b5a7a;text-transform:uppercase;"
+                            f"letter-spacing:.1em;font-weight:600;margin-bottom:4px'>Qty</div>"
+                            f"<div style='font-size:1.1rem;font-weight:700;color:#f97316'>{_qty_lbl}</div>"
+                            f"<div style='font-size:0.65rem;color:#4b5a7a'>Risk ${_risk_usd:,.2f}</div></div>",
+                            unsafe_allow_html=True)
                     else:
-                        _p4_bo = "N/A"
+                        st.markdown("<div style='margin-top:28px;font-size:0.75rem;color:#4b5a7a'>"
+                                    "Enter entry &amp; stop for qty</div>", unsafe_allow_html=True)
 
-            if st.form_submit_button("Enter Trade", use_container_width=True):
-                # Validate Phase 4 if safe mode
-                _block = None
+                # ── Inline Phase 4 gate (safe mode only) ──
+                _p4_ok = True
                 if safe_mode:
-                    _inst_sub = st.session_state.get("p4_lvl", "Yes")
-                    _fp_sub   = st.session_state.get("p4_fp", "Yes")
-                    _bo_sub   = st.session_state.get("p4_bo", "N/A")
-                    if _inst_sub.startswith("No"):
-                        _block = "Not at a valid S/R level — wait for better location."
-                    elif _fp_sub.startswith("No"):
-                        _block = "Footprint doesn't confirm — wait."
-                    elif _bo_sub == "No — false breakout":
-                        _block = "False breakout — do not trade."
-                if _block:
-                    st.error(_block)
-                else:
-                    _implied_r   = prefs["grades"][chosen_grade]["implied_r"]
-                    _entry_risk  = _risk_score(rr_target, 0, chosen_grade)
-                    _new_trade   = {
-                        "id":               len(completed) + len(active_trades) + 1,
-                        "open_date":        str(date.today()),
-                        "start_time":       datetime.now().strftime("%H:%M:%S"),
-                        "grade":            chosen_grade,
-                        "implied_r":        _implied_r,
-                        "rr_target":        rr_target,
-                        "risk_score_entry": _entry_risk,
-                        "instrument":       instrument,
-                        "entry_price":      entry_price if entry_price > 0 else None,
-                        "stop_price":       stop_price  if stop_price  > 0 else None,
-                        "add_ons":          [],
-                        "note":             note,
-                    }
-                    st.session_state.pop("_quick_grade", None)
-                    st.session_state.pop("_ws_prefill", None)
-                    active_trades.append(_new_trade)
-                    session["active_trades"] = active_trades
-                    _save_session(session)
-                    st.rerun()
+                    _inst_now = st.session_state.get("Instrument", instrument)
+                    _asset_match = next((a for a in cl_assets if a["name"] == _inst_now and
+                                         a.get("phase2_complete") and a.get("phase3_complete")), None)
+                    if _asset_match:
+                        _p4_strat = _asset_match["phase2"].get("strategy", "Mean Reversion")
+                        _p4_sc    = "#22c55e" if _p4_strat == "Mean Reversion" else "#f97316"
+                        st.markdown(
+                            f'<div style="padding:10px 0 6px;font-size:0.62rem;color:#4b5a7a;text-transform:uppercase;'
+                            f'letter-spacing:.1em;font-weight:600">Phase 4 — Pre-Trade Gate · '
+                            f'<span style="color:{_p4_sc}">{_p4_strat.upper()}</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                        _p4c1, _p4c2 = st.columns(2)
+                        with _p4c1:
+                            _p4_level = st.radio("At a valid S/R level?", ["Yes", "No — not yet"], key="p4_lvl")
+                        with _p4c2:
+                            _p4_fp    = st.radio("Footprint confirms?", ["Yes", "No — wait"], key="p4_fp")
+                        if _p4_strat == "Breakout":
+                            _p4_bo = st.radio("Breakout confirmed with order activity?",
+                                              ["Yes", "No — false breakout", "N/A"], key="p4_bo")
+                        else:
+                            _p4_bo = "N/A"
+
+                if st.form_submit_button("Enter Trade", use_container_width=True):
+                    # Validate Phase 4 if safe mode
+                    _block = None
+                    if safe_mode:
+                        _inst_sub = st.session_state.get("p4_lvl", "Yes")
+                        _fp_sub   = st.session_state.get("p4_fp", "Yes")
+                        _bo_sub   = st.session_state.get("p4_bo", "N/A")
+                        if _inst_sub.startswith("No"):
+                            _block = "Not at a valid S/R level — wait for better location."
+                        elif _fp_sub.startswith("No"):
+                            _block = "Footprint doesn't confirm — wait."
+                        elif _bo_sub == "No — false breakout":
+                            _block = "False breakout — do not trade."
+                    if _block:
+                        st.error(_block)
+                    else:
+                        _implied_r   = prefs["grades"][chosen_grade]["implied_r"]
+                        _entry_risk  = _risk_score(rr_target, 0, chosen_grade)
+                        _new_trade   = {
+                            "id":               len(completed) + len(active_trades) + 1,
+                            "open_date":        str(date.today()),
+                            "start_time":       datetime.now().strftime("%H:%M:%S"),
+                            "grade":            chosen_grade,
+                            "implied_r":        _implied_r,
+                            "rr_target":        rr_target,
+                            "risk_score_entry": _entry_risk,
+                            "instrument":       instrument,
+                            "entry_price":      entry_price if entry_price > 0 else None,
+                            "stop_price":       stop_price  if stop_price  > 0 else None,
+                            "add_ons":          [],
+                            "note":             note,
+                        }
+                        st.session_state.pop("_quick_grade", None)
+                        st.session_state.pop("_ws_prefill", None)
+                        active_trades.append(_new_trade)
+                        session["active_trades"] = active_trades
+                        _save_session(session)
+                        st.rerun()
 
 # ─── SESSION LOG ──────────────────────────────────────────────────────────────
 st.markdown("""
