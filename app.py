@@ -121,7 +121,7 @@ def _save_prefs(p):
 # ─── SESSION ─────────────────────────────────────────────────────────────────
 _SESSION_DEFAULTS = {
     "session_date":     "",
-    "active_trade":     None,
+    "active_trades":    [],          # multi-trade: list of active trade dicts
     "completed_trades": [],
     "balance_override": None,
     "fabio_state": {
@@ -140,14 +140,67 @@ _SESSION_DEFAULTS = {
         "color":       "white",
     },
     "checklist": {
-        "phase1_complete":  False,
-        "phase2":           {},
-        "phase2_complete":  False,
-        "phase3_complete":  False,
-        "phase4_complete":  False,
-        "phase4_trade_num": -1,
+        "phase1_complete": False,
+        "assets": [],              # per-asset: [{name, phase2, phase2_complete, phase3, phase3_complete}]
+        "news": {
+            "checked":    False,
+            "has_news":   False,
+            "event_name": "",
+            "event_time": "",
+        },
     },
 }
+
+_ASSET_DEFAULTS = {
+    "name":            "",
+    "phase2":          {},
+    "phase2_complete": False,
+    "phase3":          {"sr_levels": False, "trend_lines": False, "price_alerts": False},
+    "phase3_complete": False,
+}
+
+_MARKET_STATES = [
+    "Normal Day",
+    "Normal Day Variation",
+    "Inside Day",
+    "Trend Day (p profile)",
+    "Trend Day (b profile)",
+    "Double Distribution",
+    "Balanced (Merged)",
+]
+
+_PRICE_LOCATIONS = [
+    "Within VA",
+    "Between VA absolute and VAH/VAL",
+    "Outside VA",
+]
+
+def _derive_scenario(price_location, outside_va_return):
+    """Returns (scenario_num, strategy) from price location + outside VA return question."""
+    if price_location == "Within VA":
+        return 1, "Mean Reversion"
+    elif price_location == "Between VA absolute and VAH/VAL":
+        return 2, "Mean Reversion"
+    elif price_location == "Outside VA":
+        if outside_va_return:
+            return 3, "Mean Reversion"
+        else:
+            return 4, "Breakout"
+    return 1, "Mean Reversion"
+
+def _schematic_for_market_state(market_state):
+    """Return path to schematic PNG for a given market state."""
+    _assets_dir = os.path.join(_APP_DIR, "assets")
+    p1 = os.path.join(_assets_dir, "pbd_schematic_p1.png")
+    p2 = os.path.join(_assets_dir, "pbd_schematic_p2.png")
+    p3 = os.path.join(_assets_dir, "pbd_schematic_p3.png")
+    if market_state in ("Normal Day", "Normal Day Variation", "Inside Day"):
+        return p1
+    elif market_state in ("Trend Day (p profile)", "Trend Day (b profile)", "Double Distribution", "Balanced (Merged)"):
+        return p2
+    return None
+
+_SCENARIO_SCHEMATIC = os.path.join(_APP_DIR, "assets", "pbd_schematic_p3.png")
 
 def _load_history():
     sb = _get_sb()
@@ -221,13 +274,41 @@ def _load_session():
         except Exception:
             pass
     if data:
+        # ── Migrate legacy active_trade → active_trades ──
+        if "active_trade" in data and "active_trades" not in data:
+            old = data.pop("active_trade")
+            data["active_trades"] = [old] if old else []
+        # ── Migrate legacy checklist structure ──
+        if "checklist" in data:
+            cl = data["checklist"]
+            if "phase2" in cl and "assets" not in cl:
+                # old flat structure → wrap into an asset if we have data
+                old_p2 = cl.pop("phase2", {})
+                old_p2c = cl.pop("phase2_complete", False)
+                old_p3c = cl.pop("phase3_complete", False)
+                cl.pop("phase4_complete", None)
+                cl.pop("phase4_trade_num", None)
+                if old_p2 and old_p2.get("strategy"):
+                    cl["assets"] = [{
+                        **_ASSET_DEFAULTS,
+                        "name": old_p2.get("instrument", "SOL"),
+                        "phase2": old_p2,
+                        "phase2_complete": old_p2c,
+                        "phase3_complete": old_p3c,
+                    }]
+                else:
+                    cl["assets"] = []
+                if "news" not in cl:
+                    cl["news"] = dict(_SESSION_DEFAULTS["checklist"]["news"])
         if data.get("session_date") != str(date.today()):
             _recover_stale_session(data)
             s = {**_SESSION_DEFAULTS}
             s["session_date"] = str(date.today())
             s["balance_override"] = data.get("balance_override")
-            if data.get("active_trade"):
-                s["active_trade"] = data["active_trade"]
+            # carry over active trades from previous day (overnight)
+            carried = [t for t in data.get("active_trades", []) if t]
+            if carried:
+                s["active_trades"] = carried
             return s
         return {**_SESSION_DEFAULTS, **data}
     s = {**_SESSION_DEFAULTS}
@@ -900,28 +981,37 @@ with _WS_LOCK:
     _WS_STATE["pending_open"]  = None
     _WS_STATE["pending_close"] = None
 
-# Auto-pre-fill new trade form from WS open event
-if _ws_pending_open and session.get("active_trade") is None:
-    st.session_state["_ws_prefill"] = _ws_pending_open
+# Auto-pre-fill new trade form from WS open event (only if no trade open for that instrument)
+if _ws_pending_open:
+    _pf_inst = _ws_pending_open.get("instrument", "")
+    _already_open = any(t.get("instrument") == _pf_inst for t in session.get("active_trades", []))
+    if not _already_open:
+        st.session_state["_ws_prefill"] = _ws_pending_open
 
-# Auto-resolve active trade from WS close event
-if _ws_pending_close and session.get("active_trade") is not None:
-    _at   = session["active_trade"]
-    _cp   = _ws_pending_close["net_pnl"]
-    _ar   = round(_cp / (prefs["balance"] * prefs["r_pct"] / 100), 4)
-    _outcome = "Win" if _cp > 0 else ("Loss" if _cp < 0 else "BE")
-    _cr   = _risk_score(_at["rr_target"], len(_at.get("add_ons", [])), _at.get("grade", "AA"))
-    _trade = {**_at, "outcome": _outcome,
-              "close_time": _ws_pending_close["time"],
-              "actual_r": _ar, "risk_tool": _ar,
-              "okx_pnl": _cp, "okx_fee": _ws_pending_close["fee"],
-              "risk_score_close": _cr}
-    session["completed_trades"].append(_trade)
-    _archive_trade(_trade, session["session_date"])
-    session["active_trade"] = None
-    _save_session(session)
-    st.session_state["_ws_auto_closed"] = _outcome
-    st.rerun()
+# Auto-resolve active trade from WS close event (match by instrument)
+if _ws_pending_close and session.get("active_trades"):
+    _close_inst = _ws_pending_close.get("instrument", "")
+    _match_idx  = next(
+        (i for i, t in enumerate(session["active_trades"]) if t.get("instrument") == _close_inst),
+        0 if session["active_trades"] else None,
+    )
+    if _match_idx is not None:
+        _at   = session["active_trades"][_match_idx]
+        _cp   = _ws_pending_close["net_pnl"]
+        _ar   = round(_cp / (prefs["balance"] * prefs["r_pct"] / 100), 4)
+        _outcome = "Win" if _cp > 0 else ("Loss" if _cp < 0 else "BE")
+        _cr   = _risk_score(_at["rr_target"], len(_at.get("add_ons", [])), _at.get("grade", "AA"))
+        _trade = {**_at, "outcome": _outcome,
+                  "close_time": _ws_pending_close["time"],
+                  "actual_r": _ar, "risk_tool": _ar,
+                  "okx_pnl": _cp, "okx_fee": _ws_pending_close["fee"],
+                  "risk_score_close": _cr}
+        session["completed_trades"].append(_trade)
+        _archive_trade(_trade, session["session_date"])
+        session["active_trades"].pop(_match_idx)
+        _save_session(session)
+        st.session_state["_ws_auto_closed"] = _outcome
+        st.rerun()
 
 # ─── SIDEBAR ─────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -1098,7 +1188,9 @@ one_r          = balance * (prefs["r_pct"] / 100)
 daily_limit_r  = prefs["daily_limit_r"]
 daily_limit_usd = daily_limit_r * one_r
 completed      = session["completed_trades"]
-active         = session["active_trade"]
+active_trades  = session.get("active_trades", [])   # list of open trade dicts
+# Backward-compat alias: active = first open trade (or None). Used in single-trade sections.
+active         = active_trades[0] if active_trades else None
 session_pnl_r  = _session_pnl_r(completed)
 losses_r       = _session_losses_r(completed)
 safe_mode       = prefs.get("safe_mode", False)
@@ -1109,10 +1201,10 @@ mr_completed    = (mr_enabled or safe_mode) and morning_report.get("completed", 
 mr_grade_val    = morning_report.get("grade") if mr_completed else None
 mr_multiplier   = morning_report.get("multiplier", 1.0) if mr_completed else 1.0
 effective_daily_limit_r = round(daily_limit_r * mr_multiplier, 4)
-# Include active trade's total exposure (implied_r + add-ons) as already "used"
-_active_exposure = (
-    active.get("implied_r", 0) + sum(a["r"] for a in active.get("add_ons", []))
-    if active else 0.0
+# Pool exposure from ALL active trades
+_active_exposure = sum(
+    t.get("implied_r", 0) + sum(a["r"] for a in t.get("add_ons", []))
+    for t in active_trades
 )
 _used_r        = losses_r + _active_exposure
 remaining_r    = max(0.0, effective_daily_limit_r - _used_r)
@@ -1122,32 +1214,32 @@ fabio_state    = session.get("fabio_state", _SESSION_DEFAULTS["fabio_state"])
 
 # ─── CHECKLIST STATE ──────────────────────────────────────────────────────────
 _cl_def   = _SESSION_DEFAULTS["checklist"]
-checklist = {**_cl_def, **session.get("checklist", {})}
-cl_phase1 = checklist.get("phase1_complete", False)
-cl_phase2 = checklist.get("phase2_complete", False)
-cl_phase3 = checklist.get("phase3_complete", False)
-# Phase 4 valid only for the next trade after it was completed (trade_num tracks this)
-cl_phase4 = (
-    checklist.get("phase4_complete", False) and
-    checklist.get("phase4_trade_num", -1) == len(completed)
-) or (active is not None)
+_cl_raw   = session.get("checklist", {})
+checklist = {
+    "phase1_complete": _cl_raw.get("phase1_complete", False),
+    "assets":          _cl_raw.get("assets", []),
+    "news":            {**_cl_def["news"], **_cl_raw.get("news", {})},
+}
+cl_phase1  = checklist.get("phase1_complete", False)
+cl_assets  = checklist.get("assets", [])  # list of per-asset dicts
+# An asset is "ready" when both phase2 + phase3 are complete
+cl_any_ready = any(a.get("phase2_complete") and a.get("phase3_complete") for a in cl_assets)
+cl_news_done = checklist["news"].get("checked", False)
 # Sync phase1 with MRC completion
 if safe_mode and mr_completed and not cl_phase1:
     checklist["phase1_complete"] = True
     cl_phase1 = True
     session["checklist"] = checklist
     _save_session(session)
-# Gate level: 1=need phase1, 2=need phase2, 3=need phase3, 4=need phase4, 5=open
-if not safe_mode or active is not None:
+# Gate level: 1=need phase1, 2=need to add/setup assets, 5=at least one asset ready
+if not safe_mode or active_trades:
     cl_gate = 5
 elif not cl_phase1:
     cl_gate = 1
-elif not cl_phase2:
-    cl_gate = 2
-elif not cl_phase3:
-    cl_gate = 3
-elif not cl_phase4:
-    cl_gate = 4
+elif not cl_assets:
+    cl_gate = 2       # no assets added yet
+elif not cl_any_ready:
+    cl_gate = 3       # assets added but phase2/phase3 not done
 else:
     cl_gate = 5
 
@@ -1159,14 +1251,15 @@ elif pnl_pct >= 0.75:
     st.markdown(f'<div class="warn-banner">Warning — {pnl_pct*100:.0f}% of daily loss limit used. Be selective.</div>',
                 unsafe_allow_html=True)
 
-# Overnight trade banner — only if open_date is before today
-if active and active.get("open_date") and active["open_date"] != str(date.today()):
-    st.markdown(
-        f'<div class="info-banner">⚠️ Trade carried over from {active["open_date"]} — '
-        f'{active.get("grade","?")} @ R:R {active.get("rr_target","?")} still open. '
-        f'Close it when ready.</div>',
-        unsafe_allow_html=True,
-    )
+# Overnight trade banners — for any active trade opened before today
+for _ot in active_trades:
+    if _ot.get("open_date") and _ot["open_date"] != str(date.today()):
+        st.markdown(
+            f'<div class="info-banner">⚠️ {_ot.get("instrument","Trade")} carried over from {_ot["open_date"]} — '
+            f'{_ot.get("grade","?")} @ R:R {_ot.get("rr_target","?")} still open. '
+            f'Close it when ready.</div>',
+            unsafe_allow_html=True,
+        )
 
 # ─── PAGE TITLE ──────────────────────────────────────────────────────────────
 st.markdown(
@@ -1175,9 +1268,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ─── PHASES (safe mode = equal-size status cards + active form below) ──────────
+# ─── PHASES (safe mode = Phase 1 card + per-asset Phase 2/3 + news events) ──────
 if safe_mode:
-    # Pre-compute display values
     _mr_g    = morning_report.get("grade", "?")
     _mr_mult = morning_report.get("multiplier", 1.0)
     _mr_css  = morning_report.get("color", "white")
@@ -1189,131 +1281,34 @@ if safe_mode:
         f"{_mr_orig}R × {_mr_mult*100:.0f}% = {_mr_eff:.2f}R"
         if _mr_mult < 1.0 else f"{_mr_orig}R — full limit"
     )
-    _cl2    = checklist.get("phase2", {})
-    _cl2_s  = _cl2.get("strategy", "?")
-    _cl2_sc = "#22c55e" if _cl2_s == "Mean Reversion" else "#f97316"
-
-    # ── Phase status cards — single HTML block so all boxes are identical size ──
-    _CARD_STYLE  = (
-        "background:#0e1220;border:1px solid #1a2238;border-top:3px solid {bc};"
-        "border-radius:10px;padding:18px 20px;min-height:200px;"
-        "display:flex;flex-direction:column;align-items:center;text-align:center;gap:6px"
-    )
-    _LOCK_CARD = (
-        "background:#080c14;border:1px solid #1a2238;border-top:3px solid #1a2238;"
-        "border-radius:10px;padding:18px 20px;min-height:200px;"
-        "display:flex;flex-direction:column;align-items:center;justify-content:center;"
-        "text-align:center;gap:8px"
-    )
     _LBL = "font-size:0.58rem;color:#4b5a7a;text-transform:uppercase;letter-spacing:.1em;font-weight:600;text-align:center;width:100%"
-    _VAL = "font-size:0.88rem;font-weight:700;color:#e2e8f0"
+    _CARD_STYLE = ("background:#0e1220;border:1px solid #1a2238;border-top:3px solid {bc};"
+                   "border-radius:10px;padding:16px 18px;"
+                   "display:flex;flex-direction:column;align-items:center;text-align:center;gap:5px")
 
-    # Phase 1 card
+    # ── Phase 1 card ──
     if cl_phase1:
-        _p1_bc  = "#3b82f6"
-        _p1_top = f'<div class="checklist-badge-done" style="margin:0 auto">✓ Phase 1 — Human Performance</div>'
-        _p1_body = (
+        _p1_html = (
+            f'<div style="{_CARD_STYLE.format(bc="#3b82f6")}">'
+            f'<div class="checklist-badge-done" style="margin:0 auto">✓ Phase 1 — Human Performance</div>'
             f'<div style="{_LBL}">Grade</div>'
-            f'<div style="font-size:2.6rem;font-weight:800;line-height:1;letter-spacing:-0.03em" class="{_mr_css}">{_mr_g}</div>'
-            f'<div style="font-size:0.78rem;color:#94a3b8">{_mr_desc}</div>'
-            f'<div style="{_LBL};margin-top:6px">Score: <span style="color:#e2e8f0;font-weight:700">{_mr_sc}/18</span>'
-            f' &nbsp;·&nbsp; {_limit_line}</div>'
+            f'<div style="font-size:2.2rem;font-weight:800;line-height:1" class="{_mr_css}">{_mr_g}</div>'
+            f'<div style="font-size:0.75rem;color:#94a3b8">{_mr_desc}</div>'
+            f'<div style="{_LBL};margin-top:4px">Score <span style="color:#e2e8f0;font-weight:700">{_mr_sc}/18</span>'
+            f' · {_limit_line}</div>'
+            f'</div>'
         )
     else:
-        _p1_bc  = "#3b82f6"
-        _p1_top = '<div class="checklist-badge" style="margin:0 auto">Phase 1 — Human Performance</div>'
-        _p1_body = '<div style="font-size:0.88rem;color:#4b5a7a;margin-top:8px">○ Awaiting check-in</div>'
+        _p1_html = (
+            f'<div style="{_CARD_STYLE.format(bc="#3b82f6")}">'
+            f'<div class="checklist-badge" style="margin:0 auto">Phase 1 — Human Performance</div>'
+            f'<div style="font-size:0.88rem;color:#4b5a7a;margin-top:8px">○ Complete Morning Report Card to begin</div>'
+            f'</div>'
+        )
+    st.markdown(_p1_html, unsafe_allow_html=True)
 
-    # Phase 2 card
     if not cl_phase1:
-        _p2_card_html = f'<div style="{_LOCK_CARD}"><div style="font-size:1.4rem">🔒</div><div style="font-size:0.78rem;color:#4b5a7a">Complete Phase 1 first</div></div>'
-    elif cl_phase2:
-        _p2_card_html = (
-            f'<div style="{_CARD_STYLE.format(bc="#3b82f6")}">'
-            f'<div class="checklist-badge-done" style="margin:0 auto">✓ Phase 2 — Market Context</div>'
-            f'<div style="{_LBL}">Strategy</div>'
-            f'<div style="font-size:2.6rem;font-weight:800;line-height:1;letter-spacing:-0.03em;color:{_cl2_sc}">{_cl2_s.upper()}</div>'
-            f'<div style="{_LBL};margin-top:6px">'
-            f'State: <span style="{_VAL}">{_cl2.get("market_state","?")}</span>'
-            f' &nbsp;·&nbsp; D: <span style="{_VAL}">{_cl2.get("d_profile","?")}</span>'
-            f' &nbsp;·&nbsp; Loc: <span style="{_VAL}">{_cl2.get("price_location","?")}</span>'
-            f' &nbsp;·&nbsp; IB: <span style="{_VAL}">{_cl2.get("ib_size","?")}</span>'
-            f'</div></div>'
-        )
-    else:
-        _p2_card_html = (
-            f'<div style="{_CARD_STYLE.format(bc="#3b82f6")}">'
-            f'<div class="checklist-badge" style="margin:0 auto">Phase 2 — Market Context</div>'
-            f'<div style="font-size:0.88rem;color:#4b5a7a;margin-top:8px">○ Awaiting market analysis</div>'
-            f'</div>'
-        )
-
-    # Phase 3 card
-    if not cl_phase2:
-        _p3_card_html = f'<div style="{_LOCK_CARD}"><div style="font-size:1.4rem">🔒</div><div style="font-size:0.78rem;color:#4b5a7a">Complete Phase 2 first</div></div>'
-    elif cl_phase3:
-        _p3_card_html = (
-            f'<div style="{_CARD_STYLE.format(bc="#3b82f6")}">'
-            f'<div class="checklist-badge-done" style="margin:0 auto">✓ Phase 3 — Key Levels</div>'
-            f'<div style="font-size:0.88rem;color:#94a3b8;margin-top:10px;line-height:1.9">'
-            f'✓ S/R levels marked<br>✓ Trend lines drawn<br>✓ Price alerts set</div>'
-            f'</div>'
-        )
-    else:
-        _p3_card_html = (
-            f'<div style="{_CARD_STYLE.format(bc="#3b82f6")}">'
-            f'<div class="checklist-badge" style="margin:0 auto">Phase 3 — Key Levels</div>'
-            f'<div style="font-size:0.88rem;color:#4b5a7a;margin-top:8px">○ Awaiting confirmation</div>'
-            f'</div>'
-        )
-
-    # Build Phase 1 card html
-    _p1_card_html = (
-        f'<div style="{_CARD_STYLE.format(bc=_p1_bc)}">'
-        f'{_p1_top}{_p1_body}'
-        f'</div>'
-    )
-
-    st.markdown(
-        f'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px">'
-        f'{_p1_card_html}{_p2_card_html}{_p3_card_html}'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    # ── Redo buttons (only shown when phase is complete) ──
-    _rb1, _rb2, _rb3 = st.columns(3)
-    with _rb1:
-        if cl_phase1 and st.button("↩ Redo Check-In", key="redo_p1_sm", use_container_width=True):
-            session["morning_report"] = {**_SESSION_DEFAULTS["morning_report"]}
-            checklist["phase1_complete"] = False
-            checklist["phase2_complete"] = False
-            checklist["phase3_complete"] = False
-            checklist["phase4_complete"] = False
-            session["checklist"] = checklist
-            _save_session(session)
-            st.rerun()
-    with _rb2:
-        if cl_phase2 and st.button("↩ Redo Market Analysis", key="redo_p2", use_container_width=True):
-            checklist["phase2"]          = {}
-            checklist["phase2_complete"] = False
-            checklist["phase3_complete"] = False
-            checklist["phase4_complete"] = False
-            session["checklist"] = checklist
-            _save_session(session)
-            st.rerun()
-    with _rb3:
-        if cl_phase3 and st.button("↩ Redo Key Levels", key="redo_p3", use_container_width=True):
-            checklist["phase3_complete"] = False
-            checklist["phase4_complete"] = False
-            session["checklist"] = checklist
-            _save_session(session)
-            st.rerun()
-
-    # ── Active form — shown below the cards, one at a time ──
-    if not cl_phase1:
-        # Phase 1 form
-        st.markdown('<div style="margin-top:4px"></div>', unsafe_allow_html=True)
+        # ── Phase 1 form ──
         with st.form("morning_report_form"):
             qc1, qc2 = st.columns(2)
             for i, (qkey, qlabel, qopts, _) in enumerate(_MR_QUESTIONS):
@@ -1332,59 +1327,234 @@ if safe_mode:
                 }
                 _save_session(session)
                 st.rerun()
-
-    elif not cl_phase2:
-        # Phase 2 form
-        st.markdown('<div style="margin-top:4px"></div>', unsafe_allow_html=True)
-        with st.form("checklist_phase2"):
-            _p2c1, _p2c2 = st.columns(2)
-            with _p2c1:
-                _p2_market = st.radio("Market state", ["Balanced", "Imbalanced"])
-                _p2_d      = st.radio("Volume 'D' profile on 30M?", ["Yes", "No"])
-            with _p2c2:
-                _p2_loc = st.radio("Price location", ["Top of D", "Middle of D", "Bottom of D", "Outside D"])
-                _p2_ib  = st.radio("Initial Balance size", ["Large", "Small"])
-            _price_in_d    = (_p2_d == "Yes") and (_p2_loc != "Outside D")
-            _derived_strat = "Mean Reversion" if _price_in_d else "Breakout"
-            _ds_col        = "#22c55e" if _derived_strat == "Mean Reversion" else "#f97316"
-            st.markdown(
-                f'<div style="padding:8px 0 4px;font-size:0.62rem;color:#4b5a7a;text-transform:uppercase;letter-spacing:.1em;font-weight:600">Suggested Strategy</div>'
-                f'<div style="font-size:1.8rem;font-weight:900;color:{_ds_col};line-height:1">{_derived_strat.upper()}</div>',
-                unsafe_allow_html=True,
-            )
-            if st.form_submit_button("Confirm Market Context →", use_container_width=True):
-                checklist["phase2"] = {
-                    "market_state": _p2_market, "d_profile": _p2_d,
-                    "price_location": _p2_loc, "ib_size": _p2_ib,
-                    "strategy": _derived_strat,
-                }
-                checklist["phase2_complete"] = True
+    else:
+        _p1_rc, _ = st.columns([1, 5])
+        with _p1_rc:
+            if st.button("↩ Redo Check-In", key="redo_p1_sm", use_container_width=True):
+                session["morning_report"] = {**_SESSION_DEFAULTS["morning_report"]}
+                checklist["phase1_complete"] = False
+                checklist["assets"] = []
                 session["checklist"] = checklist
                 _save_session(session)
                 st.rerun()
 
-    elif not cl_phase3:
-        # Phase 3 form
-        st.markdown('<div style="margin-top:4px"></div>', unsafe_allow_html=True)
-        with st.form("checklist_phase3"):
-            _p3_1 = st.checkbox("Key S/R levels marked on chart")
-            _p3_2 = st.checkbox("Trend lines drawn on key charts")
-            _p3_3 = st.checkbox("Price alerts set on watchlist")
-            if st.form_submit_button("Confirm Key Levels →", use_container_width=True):
-                if not (_p3_1 and _p3_2 and _p3_3):
-                    st.error("Check all three to proceed.")
-                else:
-                    checklist["phase3_complete"] = True
+        if _mr_g == "F":
+            st.markdown(
+                '<div class="mr-no-trade">MORNING GRADE: F — DO NOT TRADE TODAY · Protect capital.</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── Asset management (Phase 2 + Phase 3 per asset) ──
+        st.markdown(
+            '<div style="font-size:0.72rem;font-weight:700;color:#94a3b8;text-transform:uppercase;'
+            'letter-spacing:.1em;margin:14px 0 8px">Assets to Trade Today</div>',
+            unsafe_allow_html=True,
+        )
+        _all_instruments = ["SOL", "BTC", "ETH", "SUI", "MNQ", "MES"]
+        _used_names = [a["name"] for a in cl_assets]
+        _avail = [x for x in _all_instruments if x not in _used_names]
+        if _avail:
+            _ac1, _ac2, _ = st.columns([1.5, 1, 3])
+            with _ac1:
+                _new_asset_name = st.selectbox("Asset", _avail, key="new_asset_sel", label_visibility="collapsed")
+            with _ac2:
+                if st.button("+ Add Asset", key="add_asset_btn", use_container_width=True):
+                    cl_assets.append({**_ASSET_DEFAULTS, "name": _new_asset_name})
+                    checklist["assets"] = cl_assets
                     session["checklist"] = checklist
                     _save_session(session)
                     st.rerun()
 
-    # F grade banner (shown below forms if applicable)
-    if cl_phase1 and _mr_g == "F":
-        st.markdown(
-            '<div class="mr-no-trade">MORNING GRADE: F — DO NOT TRADE TODAY · Protect capital.</div>',
-            unsafe_allow_html=True,
-        )
+        if not cl_assets:
+            st.markdown(
+                '<div class="checklist-lock" style="margin-top:8px">Add at least one asset to begin market analysis.</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── Per-asset expanders ──
+        for _ai, _asset in enumerate(cl_assets):
+            _aname  = _asset["name"]
+            _a_p2c  = _asset.get("phase2_complete", False)
+            _a_p3c  = _asset.get("phase3_complete", False)
+            _a_ready = _a_p2c and _a_p3c
+            _exp_lbl = f"{'✓' if _a_ready else '○'} {_aname} — {'Ready to trade' if _a_ready else ('Phase 3 pending' if _a_p2c else 'Phase 2 pending')}"
+
+            with st.expander(_exp_lbl, expanded=not _a_ready):
+                _rc, _ = st.columns([1, 5])
+                with _rc:
+                    if st.button(f"Remove {_aname}", key=f"rm_{_ai}", type="secondary"):
+                        cl_assets.pop(_ai)
+                        checklist["assets"] = cl_assets
+                        session["checklist"] = checklist
+                        _save_session(session)
+                        st.rerun()
+
+                # ── Phase 2 ──
+                if not _a_p2c:
+                    st.markdown(
+                        f'<div class="checklist-badge" style="display:inline-block;margin:4px 0 8px">'
+                        f'Phase 2 — Market Context: {_aname} (based on PREVIOUS day profile)</div>',
+                        unsafe_allow_html=True,
+                    )
+                    with st.form(f"p2_{_ai}"):
+                        _fc1, _fc2 = st.columns(2)
+                        with _fc1:
+                            _p2_state = st.selectbox("Previous day type", _MARKET_STATES, key=f"p2s_{_ai}")
+                            _p2_d = st.radio("Volume 'D' profile on 30M?", ["Yes", "No"], key=f"p2d_{_ai}", horizontal=True)
+                            _p2_ib = st.radio("Initial Balance size", ["Large", "Small"], key=f"p2ib_{_ai}", horizontal=True)
+                        with _fc2:
+                            _p2_loc = st.radio("Price location vs prev day VA", _PRICE_LOCATIONS, key=f"p2l_{_ai}")
+                            if st.session_state.get(f"p2l_{_ai}", "") == "Outside VA":
+                                _p2_ret_raw = st.radio(
+                                    "Price returned to VAH/VAL and resided 15–30 min?",
+                                    ["Yes", "No"], key=f"p2r_{_ai}", horizontal=True,
+                                )
+                                _p2_ret = _p2_ret_raw == "Yes"
+                            else:
+                                _p2_ret = False
+
+                        # Live scenario preview
+                        _loc_now = st.session_state.get(f"p2l_{_ai}", _PRICE_LOCATIONS[0])
+                        _ret_now = st.session_state.get(f"p2r_{_ai}", "No") == "Yes" if _loc_now == "Outside VA" else False
+                        _sc_now, _st_now = _derive_scenario(_loc_now, _ret_now)
+                        _sc_col = "#22c55e" if _st_now == "Mean Reversion" else "#f97316"
+                        st.markdown(
+                            f'<div style="padding:8px 0 4px">'
+                            f'<span style="font-size:0.6rem;color:#4b5a7a;text-transform:uppercase;'
+                            f'letter-spacing:.08em;font-weight:600">→ Scenario {_sc_now} · Strategy: </span>'
+                            f'<span style="font-size:1.1rem;font-weight:900;color:{_sc_col}">{_st_now.upper()}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                        # Schematics
+                        _ms_now = st.session_state.get(f"p2s_{_ai}", _MARKET_STATES[0])
+                        _sch1 = _schematic_for_market_state(_ms_now)
+                        _im_c1, _im_c2 = st.columns(2)
+                        if _sch1 and os.path.exists(_sch1):
+                            with _im_c1:
+                                st.image(_sch1, caption="Day type reference", use_container_width=True)
+                        if os.path.exists(_SCENARIO_SCHEMATIC):
+                            with _im_c2:
+                                st.image(_SCENARIO_SCHEMATIC, caption="Trade scenarios", use_container_width=True)
+
+                        if st.form_submit_button(f"Confirm Phase 2 for {_aname} →", use_container_width=True):
+                            _loc_s = st.session_state.get(f"p2l_{_ai}", _PRICE_LOCATIONS[0])
+                            _ret_s = st.session_state.get(f"p2r_{_ai}", "No") == "Yes" if _loc_s == "Outside VA" else False
+                            _sc_f, _st_f = _derive_scenario(_loc_s, _ret_s)
+                            cl_assets[_ai]["phase2"] = {
+                                "market_state":      st.session_state.get(f"p2s_{_ai}", _MARKET_STATES[0]),
+                                "d_profile":         st.session_state.get(f"p2d_{_ai}", "Yes"),
+                                "ib_size":           st.session_state.get(f"p2ib_{_ai}", "Large"),
+                                "price_location":    _loc_s,
+                                "outside_va_return": _ret_s,
+                                "scenario":          _sc_f,
+                                "strategy":          _st_f,
+                            }
+                            cl_assets[_ai]["phase2_complete"] = True
+                            checklist["assets"] = cl_assets
+                            session["checklist"] = checklist
+                            _save_session(session)
+                            st.rerun()
+                else:
+                    _p2d = _asset.get("phase2", {})
+                    _s_c = "#22c55e" if _p2d.get("strategy") == "Mean Reversion" else "#f97316"
+                    st.markdown(
+                        f'<div class="checklist-badge-done" style="display:inline-block;margin:4px 0 6px">'
+                        f'✓ Phase 2 — {_aname}</div><br>'
+                        f'<span style="font-size:0.75rem;color:#94a3b8">'
+                        f'Day: <strong>{_p2d.get("market_state","?")}</strong> · '
+                        f'Loc: <strong>{_p2d.get("price_location","?")}</strong> · '
+                        f'Scenario <strong>{_p2d.get("scenario","?")}</strong> · '
+                        f'Strategy: <strong style="color:{_s_c}">{_p2d.get("strategy","?")}</strong>'
+                        f'</span>',
+                        unsafe_allow_html=True,
+                    )
+                    if st.button(f"↩ Redo Phase 2 — {_aname}", key=f"rdop2_{_ai}", type="secondary"):
+                        cl_assets[_ai]["phase2"] = {}
+                        cl_assets[_ai]["phase2_complete"] = False
+                        cl_assets[_ai]["phase3_complete"] = False
+                        checklist["assets"] = cl_assets
+                        session["checklist"] = checklist
+                        _save_session(session)
+                        st.rerun()
+
+                # ── Phase 3 ──
+                if _a_p2c:
+                    st.markdown('<hr style="border-color:#1a2238;margin:12px 0">', unsafe_allow_html=True)
+                    if not _a_p3c:
+                        st.markdown(
+                            f'<div class="checklist-badge" style="display:inline-block;margin-bottom:8px">'
+                            f'Phase 3 — Key Levels: {_aname}</div>',
+                            unsafe_allow_html=True,
+                        )
+                        with st.form(f"p3_{_ai}"):
+                            st.checkbox(f"Key S/R levels marked for {_aname}", key=f"p3sr_{_ai}")
+                            st.checkbox(f"Trend lines drawn for {_aname}", key=f"p3tl_{_ai}")
+                            st.checkbox(f"Price alerts set for {_aname}", key=f"p3al_{_ai}")
+
+                            # News events — shared, shown only until checked
+                            _news = checklist.get("news", {})
+                            if not _news.get("checked"):
+                                st.markdown('<hr style="border-color:#1a2238;margin:10px 0">', unsafe_allow_html=True)
+                                st.markdown(
+                                    '<div style="font-size:0.62rem;color:#4b5a7a;text-transform:uppercase;'
+                                    'letter-spacing:.1em;font-weight:600;margin-bottom:6px">'
+                                    'News Events (shared — all assets)</div>',
+                                    unsafe_allow_html=True,
+                                )
+                                st.radio("Major news event today?", ["No", "Yes"], key=f"news_yn_{_ai}", horizontal=True)
+                                if st.session_state.get(f"news_yn_{_ai}", "No") == "Yes":
+                                    _nc1, _nc2 = st.columns(2)
+                                    with _nc1:
+                                        st.text_input("Event name", placeholder="e.g. CPI, FOMC", key=f"news_nm_{_ai}")
+                                    with _nc2:
+                                        st.text_input("Time (EST)", placeholder="e.g. 08:30", key=f"news_tm_{_ai}")
+
+                            if st.form_submit_button(f"Confirm Phase 3 for {_aname} →", use_container_width=True):
+                                if not (st.session_state.get(f"p3sr_{_ai}") and
+                                        st.session_state.get(f"p3tl_{_ai}") and
+                                        st.session_state.get(f"p3al_{_ai}")):
+                                    st.error("Check all three S/R items to proceed.")
+                                else:
+                                    cl_assets[_ai]["phase3"] = {"sr_levels": True, "trend_lines": True, "price_alerts": True}
+                                    cl_assets[_ai]["phase3_complete"] = True
+                                    checklist["assets"] = cl_assets
+                                    _news_now = checklist.get("news", {})
+                                    if not _news_now.get("checked"):
+                                        _hn = st.session_state.get(f"news_yn_{_ai}", "No") == "Yes"
+                                        checklist["news"] = {
+                                            "checked":    True,
+                                            "has_news":   _hn,
+                                            "event_name": st.session_state.get(f"news_nm_{_ai}", "") if _hn else "",
+                                            "event_time": st.session_state.get(f"news_tm_{_ai}", "") if _hn else "",
+                                        }
+                                        cl_news_done = True
+                                    session["checklist"] = checklist
+                                    _save_session(session)
+                                    st.rerun()
+                    else:
+                        st.markdown(
+                            f'<div class="checklist-badge-done" style="display:inline-block;margin-bottom:6px">'
+                            f'✓ Phase 3 — {_aname}</div><br>'
+                            f'<span style="font-size:0.75rem;color:#94a3b8">✓ S/R levels · ✓ Trend lines · ✓ Price alerts</span>',
+                            unsafe_allow_html=True,
+                        )
+                        if st.button(f"↩ Redo Phase 3 — {_aname}", key=f"rdop3_{_ai}", type="secondary"):
+                            cl_assets[_ai]["phase3_complete"] = False
+                            checklist["assets"] = cl_assets
+                            session["checklist"] = checklist
+                            _save_session(session)
+                            st.rerun()
+
+        # ── News event warning banner ──
+        _news_data = checklist.get("news", {})
+        if _news_data.get("has_news"):
+            st.markdown(
+                f'<div class="warn-banner">⚠️ News event today: <strong>{_news_data.get("event_name","?")}</strong>'
+                f' at <strong>{_news_data.get("event_time","?")}</strong> — trade cautiously around this window.</div>',
+                unsafe_allow_html=True,
+            )
 
 elif mr_enabled:
     # ── Standalone Morning Report Card (no safe mode) ──
@@ -1519,12 +1689,13 @@ pnl_color = "green" if session_pnl_r >= 0 else "red"
 pnl_sign  = "+" if session_pnl_r >= 0 else ""
 bar_color = "#ef4444" if limit_hit else ("#f59e0b" if pnl_pct >= 0.75 else "#22c55e")
 bar_pct   = int(pnl_pct * 100)
+_rem_r_fmt = f"{remaining_r:.0f}" if remaining_r == int(remaining_r) else f"{remaining_r:.2f}"
 
 st.markdown(f"""
 <div class="hero-grid">
   <div class="hero-card">
     <div class="hero-lbl">Remaining R for the day</div>
-    <div class="hero-val {remaining_color}">{remaining_r:.3f}R</div>
+    <div class="hero-val {remaining_color}">{_rem_r_fmt}R</div>
     <div class="hero-sub">Limit: {effective_daily_limit_r:.2f}R ({_fmt(0 if losses_r == 0 else -losses_r)} used){' · Grade ' + mr_grade_val if mr_grade_val and mr_multiplier < 1.0 else ''}</div>
     <div class="limit-bar-bg">
       <div class="limit-bar-fill" style="width:{bar_pct}%;background:{bar_color}"></div>
@@ -1532,7 +1703,7 @@ st.markdown(f"""
   </div>
   <div class="hero-card">
     <div class="hero-lbl">Today's R</div>
-    <div class="hero-val {pnl_color}">{pnl_sign}{session_pnl_r:.3f}R</div>
+    <div class="hero-val {pnl_color}">{pnl_sign}{session_pnl_r:.2f}R</div>
     <div class="hero-sub">{len(completed)} trade{'s' if len(completed)!=1 else ''} · 1R = ${one_r:,.2f}</div>
   </div>
   <div style="min-width:120px;background:#0e1220;border:1px solid #1a2238;border-top:2px solid #1e2a45;border-radius:8px;padding:16px 14px;flex:0.5;display:flex;flex-direction:column;align-items:center;justify-content:center">
@@ -1560,11 +1731,11 @@ if completed:
         <div class="mini-lbl">Win Rate ({len(_wins)}W/{len(_losses)}L)</div>
       </div>
       <div class="mini-card">
-        <div class="mini-val {_aw_c}">+{_avg_win:.3f}R</div>
+        <div class="mini-val {_aw_c}">+{_avg_win:.2f}R</div>
         <div class="mini-lbl">Avg Win</div>
       </div>
       <div class="mini-card">
-        <div class="mini-val {_al_c}">{_avg_loss:.3f}R</div>
+        <div class="mini-val {_al_c}">{_avg_loss:.2f}R</div>
         <div class="mini-lbl">Avg Loss</div>
       </div>
       <div class="mini-card">
@@ -1768,58 +1939,297 @@ st.markdown("""
   <div class="sec-line"></div><div class="sec-title">Active Trade</div><div class="sec-line"></div>
 </div>""", unsafe_allow_html=True)
 
-if active is None:
-    # ── Safe Mode Phase 4 gate ──
-    if safe_mode and cl_gate == 4:
-        _cl2_data  = checklist.get("phase2", {})
-        _cl2_strat = _cl2_data.get("strategy", "Mean Reversion")
-        _cl2_strat_c = "#22c55e" if _cl2_strat == "Mean Reversion" else "#f97316"
-        st.markdown(f"""
-        <div class="checklist-card">
-          <div class="checklist-badge">SAFE MODE — Phase 4 of 4</div>
-          <div style="font-size:0.85rem;color:#94a3b8;margin:4px 0 14px">
-            Pre-Trade Gate — confirm setup conditions before entering
-          </div>
-          <div style="font-size:0.65rem;color:#4b5a7a;text-transform:uppercase;
-                      letter-spacing:.1em;font-weight:600;margin-bottom:4px">Strategy today</div>
-          <div style="font-size:1rem;font-weight:700;color:{_cl2_strat_c}">{_cl2_strat.upper()}</div>
-        </div>""", unsafe_allow_html=True)
-        with st.form("checklist_phase4"):
-            _p4c1, _p4c2 = st.columns(2)
-            with _p4c1:
-                _p4_level = st.radio("Are we at a valid S/R level?", ["Yes", "No — not yet"])
-            with _p4c2:
-                _p4_fp = st.radio("Footprint / order activity confirms?", ["Yes — confirmed", "No — wait"])
-            if _cl2_strat == "Breakout":
-                _p4_bo = st.radio(
-                    "Did price break the 'D' with confirmed order activity?",
-                    ["Yes — confirmed breakout", "No — false breakout", "N/A"],
-                )
-            else:
-                _p4_bo = "N/A"
-            if st.form_submit_button("Confirm — Unlock Trading", use_container_width=True):
-                if _p4_level.startswith("No"):
-                    st.warning("Not at a valid S/R level — wait for better location.")
-                elif _p4_fp.startswith("No"):
-                    st.warning("No order activity confirmation — wait for footprint to confirm.")
-                elif _cl2_strat == "Breakout" and _p4_bo.startswith("No — false"):
-                    st.error("False breakout — do not trade. Wait for confirmed order activity.")
-                else:
-                    checklist["phase4_complete"]  = True
-                    checklist["phase4_trade_num"] = len(completed)
-                    session["checklist"] = checklist
+# EV bell curve helper — defined once, reused per trade
+import math as _math
+def _npdf(v): return _math.exp(-0.5 * v * v) / _math.sqrt(2 * _math.pi)
+_peak_pdf = _npdf(0)
+_bx = [i * 0.02 - 3.5 for i in range(351)]
+_by = [_npdf(v) for v in _bx]
+def _seg(lo, hi):
+    xs = [lo] + [v for v in _bx if lo < v < hi] + [hi]
+    return xs, [_npdf(v) for v in xs]
+
+def _draw_ev_chart(win_p, rr_target, grade_lbl):
+    if not _HAS_PLOTLY:
+        return
+    _ev  = win_p * rr_target - (1 - win_p) * 1.0
+    _z   = max(-3.2, min(3.2, _ev / 1.5))
+    _evc = "#22c55e" if _ev > 0.3 else ("#f59e0b" if _ev > -0.2 else "#ef4444")
+    _evs = "+" if _ev > 0 else ""
+    _band_cfg = [(-3.5,-3.0,'rgba(34,100,34,0.70)'),(-3.0,-2.0,'rgba(34,100,34,0.70)'),
+                 (-2.0,-1.0,'rgba(140,75,75,0.70)'),(-1.0,0.0,'rgba(45,79,181,0.80)'),
+                 (0.0,1.0,'rgba(45,79,181,0.80)'),(1.0,2.0,'rgba(140,75,75,0.70)'),
+                 (2.0,3.0,'rgba(34,100,34,0.70)'),(3.0,3.5,'rgba(34,100,34,0.70)')]
+    fig = _go.Figure()
+    for _lo, _hi, _fc in _band_cfg:
+        _sx, _sy = _seg(_lo, _hi)
+        fig.add_trace(_go.Scatter(x=_sx+_sx[::-1], y=_sy+[0]*len(_sy),
+            fill='toself', fillcolor=_fc, line=dict(width=0), showlegend=False, hoverinfo='skip'))
+    fig.add_trace(_go.Scatter(x=_bx, y=_by,
+        line=dict(color='rgba(226,232,240,0.6)', width=2), showlegend=False, hoverinfo='skip'))
+    for _sv in [-3,-2,-1,0,1,2,3]:
+        fig.add_vline(x=_sv, line_dash='solid', line_color='rgba(255,255,255,0.12)', line_width=1)
+    fig.add_vline(x=_z, line_dash='solid', line_color='#ffffff', line_width=2.5)
+    _annots = [dict(x=_px, y=_npdf(_px)*0.55, text=_pt, showarrow=False,
+                    font=dict(color='rgba(255,255,255,0.85)', size=9), xanchor='center')
+               for _px, _pt in [(-3.25,'0.1%'),(-2.5,'2.1%'),(-1.5,'13.6%'),(-0.5,'34.1%'),
+                                  (0.5,'34.1%'),(1.5,'13.6%'),(2.5,'2.1%'),(3.25,'0.1%')]]
+    _annots.append(dict(x=_z, y=_peak_pdf*1.30,
+        text=f'<b>{grade_lbl}</b><br>Avg: {_evs}{_ev:.2f}R/trade',
+        showarrow=True, arrowhead=2, arrowcolor='#ffffff', ax=0, ay=-32,
+        font=dict(color=_evc, size=10), xanchor='center',
+        bgcolor='rgba(14,18,32,0.90)', bordercolor=_evc, borderwidth=1, borderpad=4))
+    _layout = dict(height=220, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                   margin=dict(l=4,r=4,t=10,b=38), annotations=_annots)
+    _layout["xaxis"] = dict(range=[-3.6,3.6], tickvals=[-3,-2,-1,0,1,2,3],
+        ticktext=['-3σ','-2σ','-1σ','μ=0','+1σ','+2σ','+3σ'],
+        tickfont=dict(color='#94a3b8',size=11,family='monospace'),
+        showgrid=False, zeroline=False, color='#94a3b8', tickangle=0)
+    _layout["yaxis"] = dict(visible=False, range=[-0.008, _peak_pdf*1.65])
+    fig.update_layout(**_layout)
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+# ── Active trade cards — side by side ──
+_op = st.session_state.get("_outcome_pending")  # dict {idx, type} or None
+
+if active_trades:
+    _ncols = min(len(active_trades), 3)
+    _tcols = st.columns(_ncols)
+    for _ti, _trd in enumerate(active_trades):
+        with _tcols[_ti % _ncols]:
+            _ao       = _trd.get("add_ons", [])
+            _t_risk   = _trd["implied_r"] + sum(a["r"] for a in _ao)
+            _t_rr     = _trd["rr_target"]
+            _t_grade  = _trd.get("grade", "AA")
+            _t_winp   = _win_prob(_t_grade)
+            _t_rsc    = _risk_score(_t_rr, len(_ao), _t_grade)
+            _t_rc     = "#22c55e" if _t_rsc < 40 else ("#f59e0b" if _t_rsc < 70 else "#ef4444")
+            _t_rl     = "LOW" if _t_rsc < 40 else ("MOD" if _t_rsc < 70 else "HIGH")
+            _t_badges = "".join(f'<span class="addon-badge">+{a["r"]}R</span>' for a in _ao) or ""
+            _t_inst   = _trd.get("instrument", "")
+            st.markdown(f"""
+            <div class="active-card" style="margin-bottom:6px">
+              <div class="active-badge">IN TRADE</div>
+              <div class="trade-detail-row">
+                {'<div><div class="td-lbl">Instr.</div><div class="td-val orange">'+_t_inst+'</div></div>' if _t_inst else ""}
+                <div><div class="td-lbl">Grade</div><div class="td-val orange">{_t_grade}</div></div>
+                <div><div class="td-lbl">R:R</div><div class="td-val white">1:{_t_rr}</div></div>
+                <div><div class="td-lbl">At Risk</div><div class="td-val {'red' if _t_risk > _trd['implied_r'] else 'white'}">{_t_risk:.2f}R</div></div>
+                <div><div class="td-lbl">Win %</div><div class="td-val white">{_t_winp*100:.0f}%</div></div>
+                <div><div class="td-lbl">Risk</div><div style="font-size:0.78rem;font-weight:700;color:{_t_rc}">{_t_rl} {_t_rsc:.0f}</div></div>
+              </div>
+              {('<div style="margin-top:8px">'+_t_badges+'</div>') if _t_badges else ""}
+              {f'<div style="font-size:0.75rem;color:#4b5a7a;margin-top:4px">{_trd["note"]}</div>' if _trd.get("note") else ""}
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Action buttons — each trade has unique keys
+            _btn_cols = st.columns([2,2,2,2,2,1])
+            with _btn_cols[0]:
+                if st.button("WIN",  key=f"win_{_ti}",  use_container_width=True, type="primary"):
+                    st.session_state["_outcome_pending"] = {"idx": _ti, "type": "win"}
+                    st.rerun()
+            with _btn_cols[1]:
+                if st.button("LOSS", key=f"loss_{_ti}", use_container_width=True):
+                    st.session_state["_outcome_pending"] = {"idx": _ti, "type": "loss"}
+                    st.rerun()
+            with _btn_cols[2]:
+                if st.button("BE",   key=f"be_{_ti}",   use_container_width=True):
+                    st.session_state["_outcome_pending"] = {"idx": _ti, "type": "be"}
+                    st.rerun()
+            with _btn_cols[3]:
+                if st.button(f"+{prefs['addon_r']}R", key=f"add_{_ti}", use_container_width=True):
+                    st.session_state["_outcome_pending"] = {"idx": _ti, "type": "addon"}
+                    st.rerun()
+            with _btn_cols[4]:
+                if st.button("Edit", key=f"edit_{_ti}", use_container_width=True):
+                    st.session_state["_outcome_pending"] = {"idx": _ti, "type": "edit"}
+                    st.rerun()
+            with _btn_cols[5]:
+                if st.button("✕", key=f"cancel_{_ti}", use_container_width=True, help="Cancel trade"):
+                    active_trades.pop(_ti)
+                    session["active_trades"] = active_trades
                     _save_session(session)
                     st.rerun()
 
-    elif safe_mode and cl_gate < 4:
+            # EV chart — show when this trade is the one with pending action, or if only one trade
+            if (not _op or (_op and _op.get("idx") == _ti)) and len(active_trades) == 1:
+                _draw_ev_chart(_t_winp, _t_rr, f"{_t_grade} — {_t_inst or 'trade'}")
+
+# ── Outcome forms — shown for whichever trade has a pending action ──
+if _op and isinstance(_op, dict):
+    _op_idx  = _op.get("idx", 0)
+    _op_type = _op.get("type", "")
+    if _op_idx < len(active_trades):
+        _act = active_trades[_op_idx]
+        _act_rr     = _act["rr_target"]
+        _act_risk_r = _act["implied_r"] + sum(a["r"] for a in _act.get("add_ons", []))
+
+        if _op_type == "edit":
+            with st.form(f"edit_form_{_op_idx}"):
+                st.markdown(f"**Edit — {_act.get('instrument', 'Trade')}**")
+                ec1, ec2, ec3 = st.columns([2, 2, 3])
+                with ec1:
+                    _go_e = list(prefs["grades"].keys())
+                    _gl_e = [f"{k} ({prefs['grades'][k]['implied_r']}R)" for k in _go_e]
+                    _gi_e = _go_e.index(_act["grade"]) if _act["grade"] in _go_e else 0
+                    _ngl  = st.selectbox("Grade", _gl_e, index=_gi_e)
+                    _ng   = _go_e[_gl_e.index(_ngl)]
+                with ec2:
+                    _nrr = st.number_input("R:R Target", min_value=0.1, value=float(_act_rr), step=0.1, format="%.2f")
+                with ec3:
+                    _nt  = st.text_input("Note", value=_act.get("note", ""))
+                if st.form_submit_button("Save", use_container_width=True):
+                    active_trades[_op_idx]["grade"]     = _ng
+                    active_trades[_op_idx]["implied_r"] = prefs["grades"][_ng]["implied_r"]
+                    active_trades[_op_idx]["rr_target"] = _nrr
+                    active_trades[_op_idx]["note"]      = _nt
+                    session["active_trades"] = active_trades
+                    del st.session_state["_outcome_pending"]
+                    _save_session(session)
+                    st.rerun()
+
+        elif _op_type == "win":
+            with st.form(f"win_form_{_op_idx}"):
+                st.markdown(f"**Win — {_act.get('instrument','Trade')} — Enter R:R achieved:**")
+                wc1, wc2 = st.columns([3, 2])
+                with wc1:
+                    rr_achieved = st.number_input("R:R achieved", min_value=0.0,
+                                                  value=float(_act_rr), step=0.1, format="%.2f")
+                with wc2:
+                    actual_r = round(rr_achieved * _act["implied_r"], 4)
+                    st.markdown(f"**Actual R: `+{actual_r:.4f}R`**")
+                st.markdown("---")
+                _win_csv_ex = st.selectbox("CSV exchange format (optional)",
+                                           ["Auto-detect"] + _EXCHANGES, key=f"wcx_{_op_idx}")
+                _win_csv    = st.file_uploader("Verify via CSV (optional)", type=["csv"], key=f"wcsv_{_op_idx}")
+                if st.form_submit_button("Pull R from CSV", use_container_width=True) and _win_csv:
+                    _wp, _wf, _ws, _we = _parse_csv_last_close(_win_csv.read(), _win_csv_ex)
+                    st.error(_we) if _we else st.success(f"CSV ({_ws}): {round(_wp/one_r,4):+.4f}R") if _wp else None
+                if st.form_submit_button("Confirm Win", use_container_width=True):
+                    _cr = _risk_score(_act["rr_target"], len(_act.get("add_ons",[])), _act.get("grade","AA"))
+                    _trade = {**_act, "outcome": "Win", "close_time": datetime.now().strftime("%H:%M:%S"),
+                              "risk_tool": rr_achieved, "actual_r": actual_r, "risk_score_close": _cr}
+                    completed.append(_trade)
+                    _archive_trade(_trade, session["session_date"])
+                    if mode == "Secret Sauce" and fabio_submode == "Competition Mode":
+                        fabio_state["consecutive_wins"] += 1
+                        session["fabio_state"] = fabio_state
+                    active_trades.pop(_op_idx)
+                    session["completed_trades"] = completed
+                    session["active_trades"]    = active_trades
+                    del st.session_state["_outcome_pending"]
+                    _save_session(session)
+                    st.rerun()
+
+        elif _op_type == "loss":
+            _ex_cfg_l = _load_ex_cfg()
+            _is_okx_l = _ex_cfg_l.get("exchange", "OKX") == "OKX"
+            _pull_lbl = "Pull from API" if _is_okx_l else f"Pull from {_ex_cfg_l.get('exchange','API')}"
+            with st.form(f"loss_form_{_op_idx}"):
+                st.markdown(f"**Loss — {_act.get('instrument','Trade')} — confirm R lost:**")
+                lc1, lc2, lc3 = st.columns([2, 2, 2])
+                with lc1:
+                    manual_r = st.number_input("Actual R (negative)", max_value=0.0,
+                                               value=float(round(-_act_risk_r, 4)), step=0.01, format="%.4f")
+                with lc2:
+                    pull_okx = st.form_submit_button(_pull_lbl, use_container_width=True)
+                with lc3:
+                    confirm  = st.form_submit_button("Confirm Loss", use_container_width=True)
+                st.markdown("---")
+                _csv_ex_h = st.selectbox("CSV exchange format", ["Auto-detect"] + _EXCHANGES, key=f"lcx_{_op_idx}")
+                _csv_file = st.file_uploader("Or upload exchange CSV", type=["csv"], key=f"lcsv_{_op_idx}")
+                _csv_pull = st.form_submit_button("Parse CSV", use_container_width=True)
+
+                def _close_loss(ar, extra=None):
+                    _cr2 = _risk_score(_act["rr_target"], len(_act.get("add_ons",[])), _act.get("grade","AA"))
+                    _t2  = {**_act, "outcome": "Loss", "close_time": datetime.now().strftime("%H:%M:%S"),
+                            "risk_tool": ar, "actual_r": ar, "risk_score_close": _cr2, **(extra or {})}
+                    completed.append(_t2)
+                    _archive_trade(_t2, session["session_date"])
+                    if mode == "Secret Sauce" and fabio_submode == "Competition Mode":
+                        fabio_state["consecutive_wins"] = 0
+                        session["fabio_state"] = fabio_state
+                    active_trades.pop(_op_idx)
+                    session["completed_trades"] = completed
+                    session["active_trades"]    = active_trades
+                    del st.session_state["_outcome_pending"]
+                    _save_session(session)
+                    st.rerun()
+
+                if pull_okx:
+                    if not prefs.get("connection_enabled"):
+                        st.error("Enable connections first — kill switch is OFF")
+                    else:
+                        _np, _nf, _ne = _fetch_last_close()
+                        if _ne:
+                            st.error(f"OKX pull failed: {_ne}")
+                        elif _np is not None:
+                            _ar_okx = round(_np / one_r, 4)
+                            st.success(f"OKX: ${_np:,.4f} → {_ar_okx:.4f}R")
+                            _close_loss(_ar_okx, {"okx_pnl": _np, "okx_fee": _nf})
+
+                if _csv_pull:
+                    if not _csv_file:
+                        st.error("No CSV file uploaded.")
+                    else:
+                        _cp, _cf, _cs, _ce = _parse_csv_last_close(_csv_file.read(), _csv_ex_h)
+                        if _ce:
+                            st.error(f"CSV parse failed: {_ce}")
+                        elif _cp is not None:
+                            _ar_c = round(_cp / one_r, 4)
+                            st.success(f"CSV ({_cs}): {_ar_c:.4f}R")
+                            _close_loss(_ar_c, {"csv_pnl": _cp, "csv_fee": _cf})
+
+                if confirm:
+                    _close_loss(manual_r)
+
+        elif _op_type == "be":
+            with st.form(f"be_form_{_op_idx}"):
+                st.markdown(f"**Break Even — {_act.get('instrument','Trade')} — log at 0R?**")
+                if st.form_submit_button("Confirm Break Even", use_container_width=True):
+                    _cr = _risk_score(_act["rr_target"], len(_act.get("add_ons",[])), _act.get("grade","AA"))
+                    _t3 = {**_act, "outcome": "BE", "close_time": datetime.now().strftime("%H:%M:%S"),
+                           "risk_tool": 0.0, "actual_r": 0.0, "risk_score_close": _cr}
+                    completed.append(_t3)
+                    _archive_trade(_t3, session["session_date"])
+                    active_trades.pop(_op_idx)
+                    session["completed_trades"] = completed
+                    session["active_trades"]    = active_trades
+                    del st.session_state["_outcome_pending"]
+                    _save_session(session)
+                    st.rerun()
+
+        elif _op_type == "addon":
+            with st.form(f"addon_form_{_op_idx}"):
+                st.markdown(f"**Add {prefs['addon_r']}R to {_act.get('instrument','trade')}?**")
+                new_rr = st.number_input("Update R:R target", min_value=0.1,
+                                         value=float(_act_rr), step=0.1, format="%.1f")
+                if st.form_submit_button("Confirm Add-on", use_container_width=True):
+                    active_trades[_op_idx]["add_ons"].append({
+                        "r":    prefs["addon_r"],
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                    })
+                    active_trades[_op_idx]["rr_target"] = new_rr
+                    session["active_trades"] = active_trades
+                    del st.session_state["_outcome_pending"]
+                    _save_session(session)
+                    st.rerun()
+
+    # Cancel button
+    if st.button("Cancel action", key="cancel_pending"):
+        del st.session_state["_outcome_pending"]
+        st.rerun()
+
+# ── New trade form ──
+if not limit_hit:
+    if safe_mode and cl_gate < 5:
         st.markdown(
             '<div class="checklist-lock">🔒 Complete the pre-trading checklist above to unlock trading.</div>',
             unsafe_allow_html=True,
         )
-
-    if not safe_mode or cl_gate == 5:
-        # ── New trade form ──
-        # ── Quick-launch buttons ──
+    else:
+        # Quick-launch buttons
         _sel_grade = st.session_state.get("_quick_grade", "")
         qb1, qb2 = st.columns(2)
         with qb1:
@@ -1835,511 +2245,129 @@ if active is None:
                 st.session_state["_quick_grade"] = "AA"
                 st.rerun()
 
-        st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
-
-        # Pull WS prefill values (populated when OKX fill detected)
+        # WS prefill banner
         _pf = st.session_state.get("_ws_prefill") or {}
         if _pf:
-            _pf_rr   = _pf.get("rr")
-            _pf_inst = _pf.get("instrument", "SOL")
             st.markdown(
-                f'<div class="info-banner">⚡ OKX fill detected — {_pf_inst} entry @ {_pf.get("entry_px","?")} · '
+                f'<div class="info-banner">⚡ OKX fill detected — {_pf.get("instrument","?")} entry @ {_pf.get("entry_px","?")} · '
                 f'SL {_pf.get("sl_px","?")} · TP {_pf.get("tp_px","?")} · '
-                f'{"R:R " + str(_pf_rr) if _pf_rr else "No TP set — enter R:R manually"}'
+                f'{"R:R " + str(_pf.get("rr")) if _pf.get("rr") else "No TP — enter R:R manually"}'
                 f'<br>Select grade + confirm to log.</div>',
                 unsafe_allow_html=True,
             )
 
         with st.form("new_trade_form", clear_on_submit=True):
-            # Row 1: R:R + Grade + Note
-            _default_rr = float(_pf.get("rr") or 3.0)
+            _default_rr   = float(_pf.get("rr") or 3.0)
             fr1, fr2, fr3 = st.columns([1, 2, 3])
             with fr1:
-                rr_target = st.number_input(
-                    "R:R", min_value=0.1, max_value=50.0,
-                    value=_default_rr, step=0.1, format="%.1f",
-                )
+                rr_target = st.number_input("R:R", min_value=0.1, max_value=50.0,
+                                            value=_default_rr, step=0.1, format="%.1f")
             with fr2:
-                grade_opts    = list(prefs["grades"].keys())
-                grade_lbls    = [f"{k} ({prefs['grades'][k]['implied_r']}R)" for k in grade_opts]
-                default_grade = st.session_state.get("_quick_grade", "AA")
-                default_idx   = grade_opts.index(default_grade) if default_grade in grade_opts else 0
-                grade_lbl     = st.selectbox("Grade", grade_lbls, index=default_idx)
-                chosen_grade  = grade_opts[grade_lbls.index(grade_lbl)]
+                _go2     = list(prefs["grades"].keys())
+                _gl2     = [f"{k} ({prefs['grades'][k]['implied_r']}R)" for k in _go2]
+                _dg2     = st.session_state.get("_quick_grade", "AA")
+                _di2     = _go2.index(_dg2) if _dg2 in _go2 else 0
+                _gsel    = st.selectbox("Grade", _gl2, index=_di2)
+                chosen_grade = _go2[_gl2.index(_gsel)]
             with fr3:
                 note = st.text_input("Note", placeholder="Setup / reason for entry")
 
-            # Row 2: Instrument + Entry + Stop + Qty (position sizer)
             _instruments = ["SOL", "BTC", "ETH", "SUI", "MNQ", "MES"]
-            _futures = {"MNQ": 2.0, "MES": 5.0}   # $ per point
-            _pf_inst_idx = _instruments.index(_pf.get("instrument", "SOL")) \
-                           if _pf.get("instrument") in _instruments else 0
+            _futures     = {"MNQ": 2.0, "MES": 5.0}
+            _pf_ii = _instruments.index(_pf.get("instrument","SOL")) if _pf.get("instrument") in _instruments else 0
             fi1, fi2, fi3, fi4 = st.columns([1.5, 2, 2, 2])
             with fi1:
-                instrument = st.selectbox("Instrument", _instruments, index=_pf_inst_idx)
+                instrument = st.selectbox("Instrument", _instruments, index=_pf_ii)
             with fi2:
                 entry_price = st.number_input("Entry Price", min_value=0.0,
                                               value=float(_pf.get("entry_px") or 0.0),
                                               step=0.01, format="%.4f")
             with fi3:
-                stop_price  = st.number_input("Stop Price",  min_value=0.0,
+                stop_price  = st.number_input("Stop Price", min_value=0.0,
                                               value=float(_pf.get("sl_px") or 0.0),
                                               step=0.01, format="%.4f")
             with fi4:
                 _risk_usd = one_r * prefs["grades"][chosen_grade]["implied_r"]
                 _diff     = abs(entry_price - stop_price)
                 if entry_price > 0 and stop_price > 0 and _diff > 0:
-                    if instrument in _futures:
-                        _qty = _risk_usd / (_diff * _futures[instrument])
-                        _qty_lbl = f"{_qty:.3f} lots (min 1)"
-                    else:
-                        _qty = _risk_usd / _diff
-                        _qty_lbl = f"{_qty:.4f}"
+                    _qty_lbl = (f"{_risk_usd/(_diff*_futures[instrument]):.3f} lots"
+                                if instrument in _futures
+                                else f"{_risk_usd/_diff:.4f}")
                     st.markdown(
                         f"<div style='margin-top:28px'>"
                         f"<div style='font-size:0.58rem;color:#4b5a7a;text-transform:uppercase;"
                         f"letter-spacing:.1em;font-weight:600;margin-bottom:4px'>Qty</div>"
                         f"<div style='font-size:1.1rem;font-weight:700;color:#f97316'>{_qty_lbl}</div>"
-                        f"<div style='font-size:0.65rem;color:#4b5a7a'>Risk ${_risk_usd:,.2f}</div>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+                        f"<div style='font-size:0.65rem;color:#4b5a7a'>Risk ${_risk_usd:,.2f}</div></div>",
+                        unsafe_allow_html=True)
                 else:
+                    st.markdown("<div style='margin-top:28px;font-size:0.75rem;color:#4b5a7a'>"
+                                "Enter entry &amp; stop for qty</div>", unsafe_allow_html=True)
+
+            # ── Inline Phase 4 gate (safe mode only) ──
+            _p4_ok = True
+            if safe_mode:
+                _inst_now = st.session_state.get("Instrument", instrument)
+                _asset_match = next((a for a in cl_assets if a["name"] == _inst_now and
+                                     a.get("phase2_complete") and a.get("phase3_complete")), None)
+                if _asset_match:
+                    _p4_strat = _asset_match["phase2"].get("strategy", "Mean Reversion")
+                    _p4_sc    = "#22c55e" if _p4_strat == "Mean Reversion" else "#f97316"
                     st.markdown(
-                        "<div style='margin-top:28px;font-size:0.75rem;color:#4b5a7a'>"
-                        "Enter entry &amp; stop for qty</div>",
+                        f'<div style="padding:10px 0 6px;font-size:0.62rem;color:#4b5a7a;text-transform:uppercase;'
+                        f'letter-spacing:.1em;font-weight:600">Phase 4 — Pre-Trade Gate · '
+                        f'<span style="color:{_p4_sc}">{_p4_strat.upper()}</span></div>',
                         unsafe_allow_html=True,
                     )
+                    _p4c1, _p4c2 = st.columns(2)
+                    with _p4c1:
+                        _p4_level = st.radio("At a valid S/R level?", ["Yes", "No — not yet"], key="p4_lvl")
+                    with _p4c2:
+                        _p4_fp    = st.radio("Footprint confirms?", ["Yes", "No — wait"], key="p4_fp")
+                    if _p4_strat == "Breakout":
+                        _p4_bo = st.radio("Breakout confirmed with order activity?",
+                                          ["Yes", "No — false breakout", "N/A"], key="p4_bo")
+                    else:
+                        _p4_bo = "N/A"
 
-            submitted = st.form_submit_button("Enter Trade", use_container_width=True)
-            if submitted:
-                implied_r = prefs["grades"][chosen_grade]["implied_r"]
-                _entry_risk = _risk_score(rr_target, 0, chosen_grade)
-                active = {
-                    "id":               len(completed) + 1,
-                    "open_date":        str(date.today()),
-                    "start_time":       datetime.now().strftime("%H:%M:%S"),
-                    "grade":            chosen_grade,
-                    "implied_r":        implied_r,
-                    "rr_target":        rr_target,
-                    "risk_score_entry": _entry_risk,
-                    "instrument":       instrument,
-                    "entry_price":      entry_price if entry_price > 0 else None,
-                    "stop_price":  stop_price  if stop_price  > 0 else None,
-                    "add_ons":     [],
-                    "note":        note,
-                }
-                if "_quick_grade" in st.session_state:
-                    del st.session_state["_quick_grade"]
-                st.session_state.pop("_ws_prefill", None)   # clear WS prefill
-                session["active_trade"] = active
-                _save_session(session)
-                st.rerun()
-else:
-    # ── Active trade card ──
-    add_ons    = active.get("add_ons", [])
-    total_risk_r = active["implied_r"] + sum(a["r"] for a in add_ons)
-    rr_target    = active["rr_target"]
-    _grade       = active.get("grade", "AA")
-    win_p        = _win_prob(_grade)
-    risk_sc      = _risk_score(rr_target, len(add_ons), _grade)
-    risk_color   = "#22c55e" if risk_sc < 40 else ("#f59e0b" if risk_sc < 70 else "#ef4444")
-    risk_label   = "LOW" if risk_sc < 40 else ("MODERATE" if risk_sc < 70 else "HIGH")
-
-    addon_badges = "".join(
-        f'<span class="addon-badge">+{a["r"]}R @ {a["time"]}</span>' for a in add_ons
-    ) or '<span class="grey" style="font-size:0.8rem">No add-ons</span>'
-
-    _inst_html = (
-        f'<div><div class="td-lbl">Instrument</div>'
-        f'<div class="td-val orange">{active["instrument"]}</div></div>'
-        if active.get("instrument") else ""
-    )
-    st.markdown(f"""
-    <div class="active-card">
-      <div class="active-badge">IN TRADE</div>
-      <div class="trade-detail-row">
-        {_inst_html}
-        <div>
-          <div class="td-lbl">Grade</div>
-          <div class="td-val orange">{active['grade']}</div>
-        </div>
-        <div>
-          <div class="td-lbl">R:R Target</div>
-          <div class="td-val white">1 : {rr_target}</div>
-        </div>
-        <div>
-          <div class="td-lbl">Implied Risk</div>
-          <div class="td-val white">{active['implied_r']}R</div>
-        </div>
-        <div>
-          <div class="td-lbl">Total at Risk</div>
-          <div class="td-val {'red' if total_risk_r > active['implied_r'] else 'white'}">{total_risk_r:.2f}R</div>
-        </div>
-        <div>
-          <div class="td-lbl">Win Probability</div>
-          <div class="td-val white">{win_p*100:.1f}%</div>
-        </div>
-        <div>
-          <div class="td-lbl">Started</div>
-          <div class="td-val grey">{active['start_time']}</div>
-        </div>
-      </div>
-      <div style="margin-top:10px">{addon_badges}</div>
-      {f'<div style="margin-top:6px;font-size:0.8rem;color:#4b5a7a">{active["note"]}</div>' if active.get("note") else ""}
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ── Expected Value Bell Curve ──
-    # Logic: EV = win_rate × R:R − (1 − win_rate) × 1
-    #   μ = 0  → break-even trade
-    #   right  → positive EV (good trade)
-    #   left   → negative EV (bad trade)
-    # The vertical line shows exactly where THIS trade's EV lands on the distribution.
-    # Scale: z = EV / 1.5  (so EV=+3 → z≈+2σ, EV=−1.5 → z=−1σ)
-    import math as _math
-    def _npdf(v): return _math.exp(-0.5 * v * v) / _math.sqrt(2 * _math.pi)
-    _peak = _npdf(0)
-
-    _ev   = win_p * rr_target - (1 - win_p) * 1.0
-    _z    = max(-3.2, min(3.2, _ev / 1.5))   # trade position on σ axis
-    _ev_color = "#22c55e" if _ev > 0.3 else ("#f59e0b" if _ev > -0.2 else "#ef4444")
-
-    # Build dense x array
-    _bx = [i * 0.02 - 3.5 for i in range(351)]
-    _by = [_npdf(v) for v in _bx]
-
-    # Helper to get a segment of the curve within [lo, hi] (inclusive boundary points)
-    def _seg(lo, hi):
-        xs = [lo] + [v for v in _bx if lo < v < hi] + [hi]
-        return xs, [_npdf(v) for v in xs]
-
-    if _HAS_PLOTLY:
-        _fig = _go.Figure()
-
-        # Sigma band fills (colours matching standard stats diagram)
-        # dark green tails: beyond ±3σ
-        # brownish-red: ±1σ to ±3σ
-        # dark blue centre: 0 to ±1σ
-        _band_cfg = [
-            (-3.5, -3.0, 'rgba(34,100,34,0.70)'),
-            (-3.0, -2.0, 'rgba(34,100,34,0.70)'),
-            (-2.0, -1.0, 'rgba(140,75,75,0.70)'),
-            (-1.0,  0.0, 'rgba(45,79,181,0.80)'),
-            ( 0.0,  1.0, 'rgba(45,79,181,0.80)'),
-            ( 1.0,  2.0, 'rgba(140,75,75,0.70)'),
-            ( 2.0,  3.0, 'rgba(34,100,34,0.70)'),
-            ( 3.0,  3.5, 'rgba(34,100,34,0.70)'),
-        ]
-        for _lo, _hi, _fc in _band_cfg:
-            _sx, _sy = _seg(_lo, _hi)
-            _fig.add_trace(_go.Scatter(
-                x=_sx + _sx[::-1], y=_sy + [0]*len(_sy),
-                fill='toself', fillcolor=_fc,
-                line=dict(width=0), showlegend=False, hoverinfo='skip',
-            ))
-
-        # Curve outline
-        _fig.add_trace(_go.Scatter(x=_bx, y=_by,
-            line=dict(color='rgba(226,232,240,0.6)', width=2),
-            showlegend=False, hoverinfo='skip'))
-
-        # σ boundary lines
-        for _sv in [-3, -2, -1, 0, 1, 2, 3]:
-            _fig.add_vline(x=_sv, line_dash='solid',
-                line_color='rgba(255,255,255,0.12)', line_width=1)
-
-        # THIS TRADE vertical line — bright, with arrow annotation
-        _fig.add_vline(x=_z, line_dash='solid', line_color='#ffffff', line_width=2.5)
-
-        # Percentage labels inside each band
-        _pct_labels = [
-            (-3.25, '0.1%'), (-2.5, '2.1%'), (-1.5, '13.6%'),
-            (-0.5, '34.1%'), (0.5, '34.1%'), (1.5, '13.6%'),
-            (2.5, '2.1%'),   (3.25, '0.1%'),
-        ]
-        _annots = []
-        for _px, _pt in _pct_labels:
-            _annots.append(dict(
-                x=_px, y=_npdf(_px) * 0.55,
-                text=_pt, showarrow=False,
-                font=dict(color='rgba(255,255,255,0.85)', size=9),
-                xanchor='center',
-            ))
-
-        # Trade label — above the line
-        _ev_sign = "+" if _ev > 0 else ""
-        _annots.append(dict(
-            x=_z, y=_peak * 1.30,
-            text=f'<b>This trade ({_grade})</b><br>Avg outcome: {_ev_sign}{_ev:.2f}R per trade',
-            showarrow=True, arrowhead=2, arrowcolor='#ffffff',
-            ax=0, ay=-32,
-            font=dict(color=_ev_color, size=10),
-            xanchor='center', bgcolor='rgba(14,18,32,0.90)',
-            bordercolor=_ev_color, borderwidth=1, borderpad=4,
-        ))
-
-        _fig.update_layout(
-            height=280, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-            margin=dict(l=4, r=4, t=14, b=42),
-            xaxis=dict(
-                range=[-3.6, 3.6],
-                tickvals=[-3, -2, -1, 0, 1, 2, 3],
-                ticktext=['-3σ', '-2σ', '-1σ', 'μ=0', '+1σ', '+2σ', '+3σ'],
-                tickfont=dict(color='#94a3b8', size=13, family='monospace'),
-                showgrid=False, zeroline=False, color='#94a3b8',
-                tickangle=0,
-            ),
-            yaxis=dict(visible=False, range=[-0.008, _peak * 1.65]),
-            annotations=_annots,
-        )
-        st.plotly_chart(_fig, use_container_width=True, config={'displayModeBar': False})
-
-    _wp_color = "#22c55e" if win_p >= 0.5 else ("#f59e0b" if win_p >= 0.35 else "#ef4444")
-    st.markdown(
-        f'<div style="display:flex;gap:20px;flex-wrap:wrap;font-size:0.68rem;color:#4b5a7a;'
-        f'text-transform:uppercase;letter-spacing:.08em;margin:-4px 0 14px;padding:0 4px">'
-        f'<span>Grade: <strong style="color:#e2e8f0">{_grade}</strong></span>'
-        f'<span>Win Rate: <strong style="color:{_wp_color}">{win_p*100:.0f}%</strong></span>'
-        f'<span>R:R: <strong style="color:#e2e8f0">1:{rr_target}</strong></span>'
-        f'<span>Avg outcome per trade: <strong style="color:{_ev_color}">{_ev_sign}{_ev:.2f}R</strong></span>'
-        f'<span>Exposure: <strong style="color:#e2e8f0">{total_risk_r:.2f}R</strong></span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    # ── Action buttons ──
-    col_win, col_loss, col_be, col_add, col_edit, col_cancel = st.columns([2, 2, 2, 2, 2, 1])
-
-    with col_win:
-        if st.button("WIN", use_container_width=True, type="primary"):
-            st.session_state["_outcome_pending"] = "win"
-            st.rerun()
-    with col_loss:
-        if st.button("LOSS", use_container_width=True):
-            st.session_state["_outcome_pending"] = "loss"
-            st.rerun()
-    with col_be:
-        if st.button("BREAK EVEN", use_container_width=True):
-            st.session_state["_outcome_pending"] = "be"
-            st.rerun()
-    with col_add:
-        if st.button(f"+ Add {prefs['addon_r']}R", use_container_width=True):
-            st.session_state["_outcome_pending"] = "addon"
-            st.rerun()
-    with col_edit:
-        if st.button("Edit Trade", use_container_width=True):
-            st.session_state["_outcome_pending"] = "edit"
-            st.rerun()
-    with col_cancel:
-        if st.button("✕", use_container_width=True, help="Cancel trade (no log entry)"):
-            session["active_trade"] = None
-            _save_session(session)
-            st.rerun()
-
-    # ── EDIT form ──
-    if st.session_state.get("_outcome_pending") == "edit":
-        with st.form("edit_form"):
-            st.markdown("**Edit Trade**")
-            ec1, ec2, ec3 = st.columns([2, 2, 3])
-            with ec1:
-                grade_opts = list(prefs["grades"].keys())
-                grade_lbls = [f"{k} ({prefs['grades'][k]['implied_r']}R)" for k in grade_opts]
-                curr_idx   = grade_opts.index(active["grade"]) if active["grade"] in grade_opts else 0
-                new_grade_lbl = st.selectbox("Grade", grade_lbls, index=curr_idx)
-                new_grade = grade_opts[grade_lbls.index(new_grade_lbl)]
-            with ec2:
-                new_rr = st.number_input("R:R Target", min_value=0.1,
-                                         value=float(active["rr_target"]),
-                                         step=0.1, format="%.2f")
-            with ec3:
-                new_note = st.text_input("Note", value=active.get("note", ""))
-            if st.form_submit_button("Save Changes", use_container_width=True):
-                active["grade"]     = new_grade
-                active["implied_r"] = prefs["grades"][new_grade]["implied_r"]
-                active["rr_target"] = new_rr
-                active["note"]      = new_note
-                session["active_trade"] = active
-                del st.session_state["_outcome_pending"]
-                _save_session(session)
-                st.rerun()
-
-    # ── WIN form ──
-    if st.session_state.get("_outcome_pending") == "win":
-        with st.form("win_form"):
-            st.markdown("**Win — Enter R:R achieved:**")
-            wc1, wc2 = st.columns([3, 2])
-            with wc1:
-                rr_achieved = st.number_input("R:R achieved (from ATAS)", min_value=0.0,
-                                              value=float(rr_target), step=0.1, format="%.2f")
-            with wc2:
-                actual_r = round(rr_achieved * active["implied_r"], 4)
-                st.markdown(f"**Actual R: `+{actual_r:.4f}R`**")
-            # Optional: verify via CSV
-            st.markdown("---")
-            _win_csv_ex = st.selectbox("CSV exchange format (optional)",
-                                       ["Auto-detect"] + _EXCHANGES, key="win_csv_ex")
-            _win_csv    = st.file_uploader("Verify via CSV (optional)", type=["csv"], key="win_csv")
-            _win_csv_btn = st.form_submit_button("Pull R from CSV", use_container_width=True)
-            if _win_csv_btn and _win_csv:
-                _wp, _wf, _ws, _we = _parse_csv_last_close(_win_csv.read(), _win_csv_ex)
-                if _we:
-                    st.error(_we)
-                elif _wp is not None:
-                    _wr = round(_wp / one_r, 4)
-                    st.success(f"CSV ({_ws}): Net PnL = ${_wp:+,.4f} → {_wr:+.4f}R")
-            if st.form_submit_button("Confirm Win", use_container_width=True):
-                _close_risk = _risk_score(active["rr_target"], len(active.get("add_ons", [])), active.get("grade", "AA"))
-                trade = {**active, "outcome": "Win", "close_time": datetime.now().strftime("%H:%M:%S"),
-                         "risk_tool": rr_achieved, "actual_r": actual_r,
-                         "risk_score_close": _close_risk}
-                completed.append(trade)
-                _archive_trade(trade, session["session_date"])   # persist immediately
-                # Fabio competition: track consecutive wins
-                if mode == "Secret Sauce" and fabio_submode == "Competition Mode":
-                    fabio_state["consecutive_wins"] += 1
-                    session["fabio_state"] = fabio_state
-                session["completed_trades"] = completed
-                session["active_trade"]     = None
-                del st.session_state["_outcome_pending"]
-                _save_session(session)
-                st.rerun()
-
-    # ── LOSS form ──
-    elif st.session_state.get("_outcome_pending") == "loss":
-        _ex_cfg_loss = _load_ex_cfg()
-        _is_okx = _ex_cfg_loss.get("exchange", "OKX") == "OKX"
-        _pull_label = "Pull from API" if _is_okx else f"Pull from {_ex_cfg_loss.get('exchange','API')}"
-
-        with st.form("loss_form"):
-            st.markdown("**Loss — confirm R lost:**")
-            lc1, lc2, lc3 = st.columns([2, 2, 2])
-            with lc1:
-                default_loss = -total_risk_r
-                manual_r = st.number_input("Actual R (negative)", max_value=0.0,
-                                           value=float(round(default_loss, 4)),
-                                           step=0.01, format="%.4f")
-            with lc2:
-                pull_okx = st.form_submit_button(_pull_label, use_container_width=True)
-            with lc3:
-                confirm  = st.form_submit_button("Confirm Loss", use_container_width=True)
-
-            # CSV upload (non-OKX or as fallback)
-            st.markdown("---")
-            _csv_ex_hint = st.selectbox("CSV exchange format",
-                                        ["Auto-detect"] + _EXCHANGES,
-                                        key="loss_csv_ex")
-            _csv_file = st.file_uploader("Or upload exchange CSV", type=["csv"],
-                                         key="loss_csv_upload")
-            _csv_pull = st.form_submit_button("Parse CSV", use_container_width=True)
-
-            if pull_okx:
-                if not prefs.get("connection_enabled", False):
-                    st.error("Enable connections first — kill switch is OFF")
-                    net_pnl, fee, err = None, None, "offline"
+            if st.form_submit_button("Enter Trade", use_container_width=True):
+                # Validate Phase 4 if safe mode
+                _block = None
+                if safe_mode:
+                    _inst_sub = st.session_state.get("p4_lvl", "Yes")
+                    _fp_sub   = st.session_state.get("p4_fp", "Yes")
+                    _bo_sub   = st.session_state.get("p4_bo", "N/A")
+                    if _inst_sub.startswith("No"):
+                        _block = "Not at a valid S/R level — wait for better location."
+                    elif _fp_sub.startswith("No"):
+                        _block = "Footprint doesn't confirm — wait."
+                    elif _bo_sub == "No — false breakout":
+                        _block = "False breakout — do not trade."
+                if _block:
+                    st.error(_block)
                 else:
-                    net_pnl, fee, err = _fetch_last_close()
-                if err and err != "offline":
-                    st.error(f"OKX pull failed: {err}")
-                elif net_pnl is not None:
-                    actual_r_okx = round(net_pnl / one_r, 4)
-                    st.success(f"OKX: Net PnL = ${net_pnl:,.4f} (fee ${fee:,.4f}) → {actual_r_okx:.4f}R")
-                    _close_risk = _risk_score(active["rr_target"], len(active.get("add_ons", [])), active.get("grade", "AA"))
-                    trade = {**active, "outcome": "Loss", "close_time": datetime.now().strftime("%H:%M:%S"),
-                             "risk_tool": actual_r_okx, "actual_r": actual_r_okx,
-                             "okx_pnl": net_pnl, "okx_fee": fee,
-                             "risk_score_close": _close_risk}
-                    completed.append(trade)
-                    _archive_trade(trade, session["session_date"])   # persist immediately
-                    if mode == "Secret Sauce" and fabio_submode == "Competition Mode":
-                        fabio_state["consecutive_wins"] = 0
-                        session["fabio_state"] = fabio_state
-                    session["completed_trades"] = completed
-                    session["active_trade"]     = None
-                    del st.session_state["_outcome_pending"]
+                    _implied_r   = prefs["grades"][chosen_grade]["implied_r"]
+                    _entry_risk  = _risk_score(rr_target, 0, chosen_grade)
+                    _new_trade   = {
+                        "id":               len(completed) + len(active_trades) + 1,
+                        "open_date":        str(date.today()),
+                        "start_time":       datetime.now().strftime("%H:%M:%S"),
+                        "grade":            chosen_grade,
+                        "implied_r":        _implied_r,
+                        "rr_target":        rr_target,
+                        "risk_score_entry": _entry_risk,
+                        "instrument":       instrument,
+                        "entry_price":      entry_price if entry_price > 0 else None,
+                        "stop_price":       stop_price  if stop_price  > 0 else None,
+                        "add_ons":          [],
+                        "note":             note,
+                    }
+                    st.session_state.pop("_quick_grade", None)
+                    st.session_state.pop("_ws_prefill", None)
+                    active_trades.append(_new_trade)
+                    session["active_trades"] = active_trades
                     _save_session(session)
                     st.rerun()
-
-            if _csv_pull:
-                if _csv_file is None:
-                    st.error("No CSV file uploaded.")
-                else:
-                    _cp, _cf, _cs, _ce = _parse_csv_last_close(_csv_file.read(), _csv_ex_hint)
-                    if _ce:
-                        st.error(f"CSV parse failed: {_ce}")
-                    elif _cp is not None:
-                        _ar_csv = round(_cp / one_r, 4)
-                        st.success(f"CSV ({_cs}): Net PnL = ${_cp:+,.4f} (fee ${_cf:,.4f}) → {_ar_csv:.4f}R")
-                        _close_risk = _risk_score(active["rr_target"], len(active.get("add_ons", [])), active.get("grade", "AA"))
-                        trade = {**active, "outcome": "Loss", "close_time": datetime.now().strftime("%H:%M:%S"),
-                                 "risk_tool": _ar_csv, "actual_r": _ar_csv,
-                                 "csv_pnl": _cp, "csv_fee": _cf, "risk_score_close": _close_risk}
-                        completed.append(trade)
-                        _archive_trade(trade, session["session_date"])
-                        if mode == "Secret Sauce" and fabio_submode == "Competition Mode":
-                            fabio_state["consecutive_wins"] = 0
-                            session["fabio_state"] = fabio_state
-                        session["completed_trades"] = completed
-                        session["active_trade"]     = None
-                        del st.session_state["_outcome_pending"]
-                        _save_session(session)
-                        st.rerun()
-
-            if confirm:
-                _close_risk = _risk_score(active["rr_target"], len(active.get("add_ons", [])), active.get("grade", "AA"))
-                trade = {**active, "outcome": "Loss", "close_time": datetime.now().strftime("%H:%M:%S"),
-                         "risk_tool": manual_r, "actual_r": manual_r,
-                         "risk_score_close": _close_risk}
-                completed.append(trade)
-                _archive_trade(trade, session["session_date"])   # persist immediately
-                if mode == "Secret Sauce" and fabio_submode == "Competition Mode":
-                    fabio_state["consecutive_wins"] = 0
-                    session["fabio_state"] = fabio_state
-                session["completed_trades"] = completed
-                session["active_trade"]     = None
-                del st.session_state["_outcome_pending"]
-                _save_session(session)
-                st.rerun()
-
-    # ── BREAK EVEN ──
-    elif st.session_state.get("_outcome_pending") == "be":
-        with st.form("be_form"):
-            st.markdown("**Break Even — log at 0R?**")
-            if st.form_submit_button("Confirm Break Even", use_container_width=True):
-                _close_risk = _risk_score(active["rr_target"], len(active.get("add_ons", [])), active.get("grade", "AA"))
-                trade = {**active, "outcome": "BE", "close_time": datetime.now().strftime("%H:%M:%S"),
-                         "risk_tool": 0.0, "actual_r": 0.0,
-                         "risk_score_close": _close_risk}
-                completed.append(trade)
-                _archive_trade(trade, session["session_date"])   # persist immediately
-                session["completed_trades"] = completed
-                session["active_trade"]     = None
-                del st.session_state["_outcome_pending"]
-                _save_session(session)
-                st.rerun()
-
-    # ── ADD-ON ──
-    elif st.session_state.get("_outcome_pending") == "addon":
-        with st.form("addon_form"):
-            st.markdown(f"**Add {prefs['addon_r']}R to position?**")
-            new_rr = st.number_input("Update R:R target (optional)",
-                                     min_value=0.1, value=float(rr_target), step=0.1, format="%.1f")
-            if st.form_submit_button("Confirm Add-on", use_container_width=True):
-                active["add_ons"].append({
-                    "r":    prefs["addon_r"],
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                })
-                active["rr_target"] = new_rr
-                session["active_trade"] = active
-                del st.session_state["_outcome_pending"]
-                _save_session(session)
-                st.rerun()
-
-    # Cancel pending action
-    if st.session_state.get("_outcome_pending") and \
-       st.button("Cancel", key="cancel_pending"):
-        del st.session_state["_outcome_pending"]
-        st.rerun()
 
 # ─── SESSION LOG ──────────────────────────────────────────────────────────────
 st.markdown("""

@@ -5,6 +5,22 @@
 
 ## WHERE WE LEFT OFF (start here next session)
 
+**2026-03-12 — Multi-trade support + per-asset Safe Mode checklist + PbD schematics:**
+- `active_trades` list replaces single `active_trade` — multiple simultaneous open trades
+- Pooled risk: `_active_exposure` sums implied R + add-ons across ALL open trades
+- Side-by-side trade cards (up to 3 per row) with per-trade WIN/LOSS/BE/Add-on/Edit/Cancel buttons
+- Per-trade unique button keys (`win_{ti}`, `loss_{ti}`, etc.); `_outcome_pending` is `{"idx": int, "type": str}`
+- Safe Mode checklist fully rebuilt per-asset:
+  - Phase 1 (MRC) unchanged — shared across all assets
+  - Phase 2 per-asset: 7 expanded market day types, price location vs prev day VA, auto-derived scenario (1–4) + strategy (MR/BO)
+  - Phase 3 per-asset: S/R levels / trend lines / price alerts — independent per asset
+  - Shared news events check (shown in Phase 3 until answered)
+  - Phase 4 removed as global gate — now inline inside new trade form
+- "Add Asset" button for on-demand asset addition (not front-loaded)
+- PbD Playbook schematics: 3 PNG files extracted from PDF → `assets/` folder, shown in Phase 2 form
+- Backward-compatible migration: old `active_trade` dict → `active_trades` list; old flat checklist → per-asset structure
+- Formatting fixes: Remaining R (whole number if int else 2dp), Today's R (2dp), Avg Win/Loss (2dp)
+
 **2026-03-12 — Streamlit Cloud deployment + Supabase:**
 - Both apps moved to `12_Trading_Journaling_Software_Primeval/` as canonical location
 - **Both apps deployed to Streamlit Cloud — public repos, password protected**
@@ -14,7 +30,8 @@
 - OKX credentials load from Streamlit Secrets first, fall back to local file
 - New GitHub repos: `TruePrimeval/live-trading-tool-private` + `TruePrimeval/trading-analyser-private`
 - `supabase >= 2.0` added to LTT requirements.txt
-- URLs: add here when confirmed
+- Trading Analyser URL: https://trading-analyser-app-gekzsuvb5k9qj3tnbderkx.streamlit.app/
+- Live Trading Tool URL: https://live-trading-tool-app-afuvjzurglt4pbeutwnjot.streamlit.app/
 
 **2026-03-12 — LaunchAgents removed (VPN fix):**
 - Removed all auto-start LaunchAgents — caused ProtonVPN kill switch to trigger on login
@@ -54,7 +71,11 @@ python3 -m streamlit run app.py --server.port 8502
 ## File Structure
 ```
 2_Live Trading Tool/
-├── app.py                       # Main app — ~2460 lines
+├── app.py                       # Main app — ~2600+ lines
+├── assets/
+│   ├── pbd_schematic_p1.png     # PbD PDF page 1 — Normal Day / Inside Day / Normal Day Variation
+│   ├── pbd_schematic_p2.png     # PbD PDF page 2 — Trend Day / Double Distribution / VAH/VAL ref
+│   └── pbd_schematic_p3.png     # PbD PDF page 3 — all 4 Volume Profile trade scenarios
 ├── .streamlit/secrets.toml      # Local secrets — gitignored, never commit
 ├── requirements.txt             # streamlit, pandas, websocket-client, autorefresh, plotly, supabase
 ├── .gitignore                   # Excludes secrets, JSON data files
@@ -118,14 +139,14 @@ password = "PrimevalTradingApps-01"
 | **Sidebar** (kill switch, mode, safe mode, MRC, account, grades, API) | ~852–1020 |
 | Computed values + checklist state | ~1022–1080 |
 | Banners + page title | ~1082–1105 |
-| **Safe Mode phase cards + forms (4 phases)** | ~1107–1315 |
-| Standalone Morning Report Card | ~1317–1395 |
-| Top bar (mode badge + WS status) | ~1397–1430 |
-| Hero cards (Remaining R, Today's R, Wins, Losses) + mini stats | ~1432–1505 |
-| **Secret Sauce panel** (Conservative + Competition) | ~1507–1695 |
-| **Active Trade** (quick-launch, new trade form, EV bell curve, actions) | ~1695–2265 |
-| Session Log table + delete | ~2267–2345 |
-| Trade History (per-day expanders + delete + CSV export) | ~2347–2460 |
+| **Safe Mode phase cards + forms (per-asset)** | ~1107–1500 |
+| Standalone Morning Report Card | ~1500–1580 |
+| Top bar (mode badge + WS status) | ~1580–1610 |
+| Hero cards (Remaining R, Today's R, Wins, Losses) + mini stats | ~1610–1690 |
+| **Secret Sauce panel** (Conservative + Competition) | ~1690–1880 |
+| **Active Trades** (multi-trade, side-by-side cards, per-trade actions, new trade form) | ~1880–2550 |
+| Session Log table + delete | ~2550–2630 |
+| Trade History (per-day expanders + delete + CSV export) | ~2630–end |
 
 ---
 
@@ -148,18 +169,21 @@ Every 2.5s (autorefresh):
 
 ---
 
-## Safe Mode — 4-Phase Pre-Trade Checklist
+## Safe Mode — Per-Asset Pre-Trade Checklist
 
-| Phase | What | Gate |
-|-------|------|------|
-| 1 | Morning Report Card | Always required in safe mode |
-| 2 | Market Context (state, D profile, price location, IB size) → auto-derives strategy | Unlocks after phase 1 |
-| 3 | Key Levels (S/R marked, trend lines, alerts set) | Unlocks after phase 2 |
-| 4 | Pre-Trade Gate (S/R level + footprint confirm) | Per-trade, resets each trade |
+| Phase | What | Scope |
+|-------|------|-------|
+| 1 | Morning Report Card | Shared — once per session |
+| 2 | Market Context: day type (7 options), D profile, IB, price location vs prev VA → auto-derives scenario (1–4) + strategy (MR/BO) + shows PbD schematics | Per asset |
+| 3 | Key Levels: S/R levels, trend lines, price alerts + shared news events check | Per asset (news = shared) |
+| 4 | Pre-Trade Gate: S/R valid? footprint confirms? scenario conditions met? | Inline in new trade form |
 
-- Phase 2 auto-derives: price in D → Mean Reversion, outside D → Breakout
-- `cl_gate` var (1–5) controls display. Gate 5 = trading unlocked.
-- Redo buttons for each phase shown when complete
+- Phase 2 market states: Normal Day, Normal Day Variation, Inside Day, Trend Day (p/b), Double Distribution, Balanced (Merged)
+- Scenario derivation: Within VA → Sc1 (MR) | Between VA abs & VAH/VAL → Sc2 (MR) | Outside VA + returns → Sc3 (MR) | Outside VA + no return → Sc4 (BO)
+- `cl_gate` (1–5): 1=no MRC, 2=no assets, 3=assets incomplete, 5=trading unlocked
+- "Add Asset" button adds assets on-demand (not front-loaded)
+- Per-asset `st.expander` — expanded when incomplete, collapsed when done
+- Redo buttons on each completed phase
 
 ---
 
