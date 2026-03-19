@@ -2218,56 +2218,28 @@ if safe_mode:
                  )
                  _rd_pad, _rd_btn, _rd_pad2 = st.columns([2, 1, 2])
                  with _rd_btn:
-                     if st.button(f"↩ Redo", key=f"rdop2_{_ai}", type="secondary", width="stretch"):
-                         cl_assets[_ai]["phase2"] = {}
+                     if st.button(f"✏ Edit", key=f"rdop2_{_ai}", type="secondary", width="stretch"):
+                         # Pre-populate session_state keys from saved Phase 2 data
+                         _p2_saved = cl_assets[_ai].get("phase2", {})
+                         if _p2_saved.get("day_type"):
+                             st.session_state[f"p2s_{_ai}"] = _p2_saved["day_type"]
+                         if _p2_saved.get("open_location"):
+                             st.session_state[f"p2o_{_ai}"] = _p2_saved["open_location"]
+                         if _p2_saved.get("close_location"):
+                             st.session_state[f"p2c_{_ai}"] = _p2_saved["close_location"]
+                         if _p2_saved.get("tail"):
+                             st.session_state[f"p2t_{_ai}"] = _p2_saved["tail"]
+                         if _p2_saved.get("ib_size"):
+                             st.session_state[f"p2ib_{_ai}"] = _p2_saved["ib_size"]
+                         # Keep phase2 data but mark incomplete so form re-renders
                          cl_assets[_ai]["phase2_complete"] = False
-                         cl_assets[_ai]["phase3_complete"] = False
                          checklist["assets"] = cl_assets
                          session["checklist"] = checklist
                          _save_session(session)
                          st.rerun()
 
-             # ── Trade Setup (Opening Variant) ──
+             # ── Trade Setup (Strategy Tabs: Swing / Day Trade / Scalp) ──
              if _a_p2c:
-                 _VARIANT_IMAGES = {
-                     "Variant 1": os.path.join(_APP_DIR, "assets", "variant_1_within_va.png"),
-                     "Variant 2": os.path.join(_APP_DIR, "assets", "variant_2_va_absolute.png"),
-                     "Variant 3": os.path.join(_APP_DIR, "assets", "variant_3_outside_stays.png"),
-                     "Variant 4": os.path.join(_APP_DIR, "assets", "variant_4_outside_returns.png"),
-                 }
-                 _VARIANT_INFO = {
-                     "Variant 1": {
-                         "title": "Open Within VA",
-                         "desc": "Price opens within yesterday's VA. Once it moves to VAH or VAL and stays 30min → full VA traverse likely.",
-                         "entry": "At VAH or VAL (whichever price reaches first)",
-                         "tp": "Opposite VAH/VAL",
-                         "sl": "Beyond absolute high/low of the day",
-                     },
-                     "Variant 2": {
-                         "title": "Open Between VA-abs and VAH/VAL",
-                         "desc": "Price opened outside VA but within absolute range. Likely heading to vPOC. Trade the bounce back.",
-                         "entry": "At vPOC after bounce confirmation",
-                         "tp": "Back to today's opening price",
-                         "sl": "Beyond vPOC",
-                     },
-                     "Variant 3": {
-                         "title": "Open Outside VA-abs (Stays Out)",
-                         "desc": "Strong gap/imbalance. Price stays outside — expect acceleration away from previous VA.",
-                         "entry": "On retests of structure breaks",
-                         "tp": "Big-picture levels, naked POCs, prior VAs",
-                         "sl": "Between VA-absolute and VAH/VAL",
-                     },
-                     "Variant 4": {
-                         "title": "Open Outside VA-abs → Returns Into VA (80% Rule)",
-                         "desc": "Price opened outside but returned into VA and stayed 30min. 80% probability of full VA traverse.",
-                         "entry": "At VAH or VAL (NOT at VA-absolute)",
-                         "tp": "Opposite VAH/VAL (full traverse)",
-                         "sl": "Between VAH/VAL and absolute high/low",
-                     },
-                 }
-                 _vs_key = f"variant_{_ai}"
-                 _current_variant = st.session_state.get(_vs_key, None)
-
                  st.markdown(
                      f'<div class="sec-hdr" style="margin:20px 0 6px">'
                      f'<div class="sec-line"></div>'
@@ -2275,46 +2247,119 @@ if safe_mode:
                      f'<div class="sec-line"></div>'
                      f'</div>'
                      f'<div style="text-align:center;font-size:0.7rem;color:#4b5a7a;text-transform:uppercase;'
-                     f'letter-spacing:.1em;font-weight:600;margin:0 0 12px">Opening Variant · {_aname}</div>',
+                     f'letter-spacing:.1em;font-weight:600;margin:0 0 12px">{_aname}</div>',
                      unsafe_allow_html=True,
                  )
 
-                 # 4 variant cards in a row
-                 _v_cols = st.columns(4)
-                 for _vi, (_vk, _vinfo) in enumerate(_VARIANT_INFO.items()):
-                     with _v_cols[_vi]:
-                         _v_img = _VARIANT_IMAGES.get(_vk)
-                         if _v_img and os.path.exists(_v_img):
-                             st.image(_v_img, width="stretch")
-                         _v_sel = _current_variant == _vk
-                         _v_btn_type = "primary" if _v_sel else "secondary"
-                         if st.button(
-                             _vinfo["title"].split("(")[0].strip(),
-                             key=f"var_{_ai}_{_vi}", type=_v_btn_type, width="stretch",
-                         ):
-                             st.session_state[_vs_key] = _vk
-                             st.rerun()
+                 _strat_tabs = st.tabs(["Swing Trade", "Day Trade", "Scalp"])
 
-                 # Show selected variant details
-                 if _current_variant and _current_variant in _VARIANT_INFO:
-                     _sv = _VARIANT_INFO[_current_variant]
+                 # ── TAB 1: Swing Trade (Opening Variants — existing rules) ──
+                 with _strat_tabs[0]:
+                     _VARIANT_IMAGES = {
+                         "Variant 1": os.path.join(_APP_DIR, "assets", "variant_1_within_va.png"),
+                         "Variant 2": os.path.join(_APP_DIR, "assets", "variant_2_va_absolute.png"),
+                         "Variant 3": os.path.join(_APP_DIR, "assets", "variant_3_outside_stays.png"),
+                         "Variant 4": os.path.join(_APP_DIR, "assets", "variant_4_outside_returns.png"),
+                     }
+                     _VARIANT_INFO = {
+                         "Variant 1": {
+                             "title": "Open Within VA",
+                             "desc": "Price opens within yesterday's VA. Once it moves to VAH or VAL and stays 30min → full VA traverse likely.",
+                             "entry": "At VAH or VAL (whichever price reaches first)",
+                             "tp": "Opposite VAH/VAL",
+                             "sl": "Beyond absolute high/low of the day",
+                         },
+                         "Variant 2": {
+                             "title": "Open Between VA-abs and VAH/VAL",
+                             "desc": "Price opened outside VA but within absolute range. Likely heading to vPOC. Trade the bounce back.",
+                             "entry": "At vPOC after bounce confirmation",
+                             "tp": "Back to today's opening price",
+                             "sl": "Beyond vPOC",
+                         },
+                         "Variant 3": {
+                             "title": "Open Outside VA-abs (Stays Out)",
+                             "desc": "Strong gap/imbalance. Price stays outside — expect acceleration away from previous VA.",
+                             "entry": "On retests of structure breaks",
+                             "tp": "Big-picture levels, naked POCs, prior VAs",
+                             "sl": "Between VA-absolute and VAH/VAL",
+                         },
+                         "Variant 4": {
+                             "title": "Open Outside VA-abs → Returns Into VA (80% Rule)",
+                             "desc": "Price opened outside but returned into VA and stayed 30min. 80% probability of full VA traverse.",
+                             "entry": "At VAH or VAL (NOT at VA-absolute)",
+                             "tp": "Opposite VAH/VAL (full traverse)",
+                             "sl": "Between VAH/VAL and absolute high/low",
+                         },
+                     }
+                     _vs_key = f"variant_{_ai}"
+                     _current_variant = st.session_state.get(_vs_key, None)
+
                      st.markdown(
-                         f'<div style="background:#0a0e18;border:1px solid #1e2a45;border-radius:10px;'
-                         f'padding:16px 20px;margin:10px 0;text-align:center">'
-                         f'<div style="font-size:0.95rem;font-weight:700;color:#e2e8f0;margin-bottom:8px">'
-                         f'{_sv["title"]}</div>'
-                         f'<div style="font-size:0.8rem;color:#94a3b8;margin-bottom:12px">{_sv["desc"]}</div>'
-                         f'<div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">'
-                         f'<div style="text-align:center">'
-                         f'<div style="font-size:0.6rem;color:#22c55e;text-transform:uppercase;letter-spacing:.08em;font-weight:600">Entry</div>'
-                         f'<div style="font-size:0.75rem;color:#e2e8f0">{_sv["entry"]}</div></div>'
-                         f'<div style="text-align:center">'
-                         f'<div style="font-size:0.6rem;color:#3b82f6;text-transform:uppercase;letter-spacing:.08em;font-weight:600">Take Profit</div>'
-                         f'<div style="font-size:0.75rem;color:#e2e8f0">{_sv["tp"]}</div></div>'
-                         f'<div style="text-align:center">'
-                         f'<div style="font-size:0.6rem;color:#ef4444;text-transform:uppercase;letter-spacing:.08em;font-weight:600">Stop Loss</div>'
-                         f'<div style="font-size:0.75rem;color:#e2e8f0">{_sv["sl"]}</div></div>'
-                         f'</div></div>',
+                         '<div style="text-align:center;font-size:0.65rem;color:#4b5a7a;text-transform:uppercase;'
+                         'letter-spacing:.1em;font-weight:600;margin:0 0 10px">Opening Variant</div>',
+                         unsafe_allow_html=True,
+                     )
+
+                     # 4 variant cards in a row
+                     _v_cols = st.columns(4)
+                     for _vi, (_vk, _vinfo) in enumerate(_VARIANT_INFO.items()):
+                         with _v_cols[_vi]:
+                             _v_img = _VARIANT_IMAGES.get(_vk)
+                             if _v_img and os.path.exists(_v_img):
+                                 st.image(_v_img, use_container_width=True)
+                             _v_sel = _current_variant == _vk
+                             _v_btn_type = "primary" if _v_sel else "secondary"
+                             if st.button(
+                                 _vinfo["title"].split("(")[0].strip(),
+                                 key=f"var_{_ai}_{_vi}", type=_v_btn_type, width="stretch",
+                             ):
+                                 st.session_state[_vs_key] = _vk
+                                 st.rerun()
+
+                     # Show selected variant details
+                     if _current_variant and _current_variant in _VARIANT_INFO:
+                         _sv = _VARIANT_INFO[_current_variant]
+                         st.markdown(
+                             f'<div style="background:#0a0e18;border:1px solid #1e2a45;border-radius:10px;'
+                             f'padding:16px 20px;margin:10px 0;text-align:center">'
+                             f'<div style="font-size:0.95rem;font-weight:700;color:#e2e8f0;margin-bottom:8px">'
+                             f'{_sv["title"]}</div>'
+                             f'<div style="font-size:0.8rem;color:#94a3b8;margin-bottom:12px">{_sv["desc"]}</div>'
+                             f'<div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">'
+                             f'<div style="text-align:center">'
+                             f'<div style="font-size:0.6rem;color:#22c55e;text-transform:uppercase;letter-spacing:.08em;font-weight:600">Entry</div>'
+                             f'<div style="font-size:0.75rem;color:#e2e8f0">{_sv["entry"]}</div></div>'
+                             f'<div style="text-align:center">'
+                             f'<div style="font-size:0.6rem;color:#3b82f6;text-transform:uppercase;letter-spacing:.08em;font-weight:600">Take Profit</div>'
+                             f'<div style="font-size:0.75rem;color:#e2e8f0">{_sv["tp"]}</div></div>'
+                             f'<div style="text-align:center">'
+                             f'<div style="font-size:0.6rem;color:#ef4444;text-transform:uppercase;letter-spacing:.08em;font-weight:600">Stop Loss</div>'
+                             f'<div style="font-size:0.75rem;color:#e2e8f0">{_sv["sl"]}</div></div>'
+                             f'</div></div>',
+                             unsafe_allow_html=True,
+                         )
+
+                 # ── TAB 2: Day Trade (placeholder) ──
+                 with _strat_tabs[1]:
+                     st.markdown(
+                         '<div style="background:#0a0e18;border:1px dashed #1e2a45;border-radius:12px;'
+                         'padding:40px 24px;text-align:center;margin:8px 0">'
+                         '<div style="font-size:1.1rem;font-weight:700;color:#4b5a7a;margin-bottom:8px">Day Trade Rules</div>'
+                         '<div style="font-size:0.82rem;color:#3a4560">Coming soon — intraday setups, IB-based entries, '
+                         'micro-structure analysis, and session-specific timing rules.</div>'
+                         '</div>',
+                         unsafe_allow_html=True,
+                     )
+
+                 # ── TAB 3: Scalp (placeholder) ──
+                 with _strat_tabs[2]:
+                     st.markdown(
+                         '<div style="background:#0a0e18;border:1px dashed #1e2a45;border-radius:12px;'
+                         'padding:40px 24px;text-align:center;margin:8px 0">'
+                         '<div style="font-size:1.1rem;font-weight:700;color:#4b5a7a;margin-bottom:8px">Scalp Rules</div>'
+                         '<div style="font-size:0.82rem;color:#3a4560">Coming soon — footprint-based scalp entries, '
+                         'order flow confirmation, delta divergence, and micro-pullback setups.</div>'
+                         '</div>',
                          unsafe_allow_html=True,
                      )
 
@@ -2483,17 +2528,42 @@ if safe_mode:
                      unsafe_allow_html=True,
                  )
                  if not _a_p3c:
-                     with st.form(f"p3_{_ai}"):
-                         st.checkbox(f"Key Support / Resistance levels marked for {_aname}", key=f"p3sr_{_ai}")
-                         st.checkbox(f"Trend lines drawn for {_aname}", key=f"p3tl_{_ai}")
-                         st.checkbox(f"Price alerts set for {_aname}", key=f"p3al_{_ai}")
-
-                         if st.form_submit_button(f"Confirm Phase 3 for {_aname} →", width="stretch"):
-                             if not (st.session_state.get(f"p3sr_{_ai}") and
-                                     st.session_state.get(f"p3tl_{_ai}") and
-                                     st.session_state.get(f"p3al_{_ai}")):
-                                 st.error("Check all three items to proceed.")
-                             else:
+                     _p3_items = [
+                         (f"p3sr_{_ai}", "Support / Resistance", "Key levels marked on chart"),
+                         (f"p3tl_{_ai}", "Trend Lines", "Drawn on relevant timeframes"),
+                         (f"p3al_{_ai}", "Price Alerts", "Set at key levels"),
+                     ]
+                     _p3_cols = st.columns(3)
+                     for _p3i, (_p3k, _p3title, _p3sub) in enumerate(_p3_items):
+                         _p3_on = st.session_state.get(_p3k, False)
+                         with _p3_cols[_p3i]:
+                             _p3_border = "#22c55e" if _p3_on else "#1e2a45"
+                             _p3_bg = "#0a1a0a" if _p3_on else "#0a0e18"
+                             _p3_icon = "✓" if _p3_on else "○"
+                             _p3_icon_col = "#22c55e" if _p3_on else "#4b5a7a"
+                             st.markdown(
+                                 f'<div style="background:{_p3_bg};border:2px solid {_p3_border};border-radius:10px;'
+                                 f'padding:18px 14px;text-align:center;min-height:100px;'
+                                 f'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px">'
+                                 f'<div style="font-size:1.4rem;color:{_p3_icon_col};line-height:1">{_p3_icon}</div>'
+                                 f'<div style="font-size:0.95rem;font-weight:700;color:#e2e8f0">{_p3title}</div>'
+                                 f'<div style="font-size:0.7rem;color:#4b5a7a">{_p3sub}</div>'
+                                 f'</div>',
+                                 unsafe_allow_html=True,
+                             )
+                             if st.button(
+                                 "Done ✓" if _p3_on else "Mark Done",
+                                 key=f"p3btn_{_p3k}",
+                                 type="primary" if _p3_on else "secondary",
+                                 width="stretch",
+                             ):
+                                 st.session_state[_p3k] = not _p3_on
+                                 st.rerun()
+                     _p3_all = all(st.session_state.get(k, False) for k, _, _ in _p3_items)
+                     if _p3_all:
+                         _p3_pad1, _p3_btn, _p3_pad2 = st.columns([1, 2, 1])
+                         with _p3_btn:
+                             if st.button(f"Confirm Phase 3 for {_aname} →", key=f"p3_confirm_{_ai}", width="stretch", type="primary"):
                                  cl_assets[_ai]["phase3"] = {"sr_levels": True, "trend_lines": True, "price_alerts": True}
                                  cl_assets[_ai]["phase3_complete"] = True
                                  checklist["assets"] = cl_assets
@@ -2501,18 +2571,27 @@ if safe_mode:
                                  _save_session(session)
                                  st.rerun()
                  else:
-                     st.markdown(
-                         f'<div class="checklist-badge-done" style="display:inline-block;margin-bottom:6px">'
-                         f'✓ Phase 3 — {_aname}</div><br>'
-                         f'<span style="font-size:0.75rem;color:#94a3b8">✓ Support / Resistance · ✓ Trend lines · ✓ Price alerts</span>',
-                         unsafe_allow_html=True,
+                     _p3_done_html = (
+                         '<div style="display:flex;gap:10px;justify-content:center;margin:8px 0">'
                      )
-                     if st.button(f"↩ Redo Phase 3 — {_aname}", key=f"rdop3_{_ai}", type="secondary"):
-                         cl_assets[_ai]["phase3_complete"] = False
-                         checklist["assets"] = cl_assets
-                         session["checklist"] = checklist
-                         _save_session(session)
-                         st.rerun()
+                     for _p3_lbl in ["Support / Resistance", "Trend Lines", "Price Alerts"]:
+                         _p3_done_html += (
+                             f'<div style="background:#0a1a0a;border:2px solid #22c55e;border-radius:10px;'
+                             f'padding:14px 18px;text-align:center;flex:1;max-width:200px">'
+                             f'<div style="font-size:1.2rem;color:#22c55e;line-height:1">✓</div>'
+                             f'<div style="font-size:0.85rem;font-weight:700;color:#e2e8f0;margin-top:4px">{_p3_lbl}</div>'
+                             f'</div>'
+                         )
+                     _p3_done_html += '</div>'
+                     st.markdown(_p3_done_html, unsafe_allow_html=True)
+                     _p3e_pad, _p3e_btn, _p3e_pad2 = st.columns([2, 1, 2])
+                     with _p3e_btn:
+                         if st.button(f"✏ Edit Phase 3", key=f"rdop3_{_ai}", type="secondary", width="stretch"):
+                             cl_assets[_ai]["phase3_complete"] = False
+                             checklist["assets"] = cl_assets
+                             session["checklist"] = checklist
+                             _save_session(session)
+                             st.rerun()
 
          # ── News Events Gate (shared — after all Phase 3s, before trading) ──
          _NEWS_EVENTS = [
