@@ -1,12 +1,54 @@
 # Live Trading Tool — Session Handoff
-> Last updated: 2026-03-12 (session 2)
+> Last updated: 2026-03-18 (session 3)
 
 ---
 
 ## WHERE WE LEFT OFF (start here next session)
 
 **⚠ NEXT SESSION — START HERE FIRST:**
-- **"Type of day" UI is not right** — the market day type selection in Phase 2 was better before the decision-box restructure. User says "before was better". Review Phase 2 day type UI and restore/improve it before doing anything else.
+- Create better images for the 4 opening variant schematics (user will provide)
+- IB timer: live clock for futures NY session open (9:30 ET), notification when IB forms (10:00 ET)
+- Context label in asset tab header once confirmed
+- Settings page: timezone (`user_tz_offset`), other site-wide preferences
+- P-setup / b-setup entry logic (3 stages: pullback → break-in → break-out) — add as sub-options in Trade Setup
+- 4 breakout models integration
+- Replace `use_container_width` with `width='stretch'` (Streamlit deprecation)
+
+**DONE this session (2026-03-18 session 3):**
+- ✅ Phase 1 collapses into expander when complete
+- ✅ Phase 2/3/News collapse with checkbox toggle when all done
+- ✅ Trade Setup section: 4 opening variants with clickable images + Entry/TP/SL
+- ✅ News events: time-aware (active/upcoming/expired), greyed out when passed
+- ✅ Hard news gate: blocks trade entry ±30min around EXTREME/HIGH events
+- ✅ Grade gating: MR context → AAA only, TR → AA only
+- ✅ Context cards above Active Trading
+- ✅ Context CSV log + attached to trade records
+- ✅ Open/Close relationship matrix (9 combos, close dominant)
+- ✅ Sync blocked in LTT_LOCAL mode (VPN safe)
+
+---
+
+**2026-03-18 (session 3) — pbD Market Context full redesign:**
+- Deep-dived TTT Masterclass course material (Volume Profile, Market Profile, pbD Playbook, Planning & Analysis)
+- Created `PBD_MARKET_CONTEXT_REFERENCE.md` — comprehensive pbD methodology reference
+- Phase 2 completely rebuilt with 5-step context derivation:
+  - Step 1: 7 TPO profile types with clickable image cards (user-created schematics, inverted colors)
+  - Steps 2-3: Open/Close 3×3 relationship matrix (close dominant per Dalton auction theory)
+  - Step 4: Tail quality (real vs fake — 3+ TPOs mid-session = real, 1-2 or end-of-session = poor)
+  - Step 5: Initial Balance (Normal/Large/Small — Small IB can override MR day types to trending)
+  - Derived context: MEAN REVERTING / MR LONG / MR SHORT / TREND LONG / TREND SHORT + confidence %
+  - Special: Inside Day → CAUTION / BREAKOUT EXPECTED; DD + extreme open/close → upgrades to TR
+- NDV split into Long and Short variants (separate images + scoring)
+- All widgets moved outside st.form so live preview updates immediately
+- Context persistence: `context_history.csv` log + context dict attached to every trade record
+- News Events gate after Phase 3: 11 preset events by impact, ET→local time conversion (UTC+1), big DO NOT TRADE banner with time window
+- Asset tabs: "+" tab to add, centered remove with confirm, reorder arrows (◀ ▶)
+- Phase 1 collapses into expander when complete (minimize scrolling)
+- Day context cards shown above Active Trading section (color-coded per asset)
+- SYNC button in sidebar: pulls today's fills + open positions from OKX REST (blocked in LTT_LOCAL)
+- Consistent styling: `── Title ──` headers, centered text, "Support / Resistance" not "S/R"
+- Safe mode ON/OFF now renders identical Phase 1 layout
+- `LTT_LOCAL=1` blocks ALL outbound requests (Supabase + OKX REST + password gate)
 
 ---
 
@@ -40,7 +82,7 @@
 - Formatting fixes: Remaining R (whole number if int else 2dp), Today's R (2dp), Avg Win/Loss (2dp)
 
 **2026-03-12 — Streamlit Cloud deployment + Supabase:**
-- Both apps moved to `12_Trading_Journaling_Software_Primeval/` as canonical location
+- Both apps moved to `Trading App Project/01_Trading_Analyser _&_LTT_Software_Primeval/` as canonical location
 - **Both apps deployed to Streamlit Cloud — public repos, password protected**
 - GitHub repos made public (password gate protects content — nobody gets in without password)
 - Supabase replaces local JSON files for prefs/session/history on cloud
@@ -64,8 +106,8 @@
 
 | What | Path |
 |------|------|
-| **Live Trading Tool** (edit here) | `12_Trading_Journaling_Software_Primeval/2_Live Trading Tool/` |
-| **Trading Analyser** (edit here) | `12_Trading_Journaling_Software_Primeval/1_Trading_Analyser/` |
+| **Live Trading Tool** (edit here) | `Trading App Project/01_Trading_Analyser _&_LTT_Software_Primeval/2_Live Trading Tool/` |
+| **Trading Analyser** (edit here) | `Trading App Project/01_Trading_Analyser _&_LTT_Software_Primeval/1_Trading_Analyser/` |
 | Old LTT copy (stale — do not edit) | `~/live-trading-tool/` |
 | Old TA copy (stale — do not edit) | `12_Trading_Analyser/` |
 
@@ -75,7 +117,7 @@
 
 **Locally:**
 ```bash
-cd "12_Trading_Journaling_Software_Primeval/2_Live Trading Tool"
+cd "Trading App Project/01_Trading_Analyser _&_LTT_Software_Primeval/2_Live Trading Tool"
 python3 -m streamlit run app.py --server.port 8502
 # Opens at http://localhost:8502
 # Password: PrimevalTradingApps-01
@@ -301,7 +343,7 @@ Risk$ = balance × r_pct% × grade_implied_r
 ## Run Commands
 ```bash
 # Start locally
-cd "12_Trading_Journaling_Software_Primeval/2_Live Trading Tool"
+cd "Trading App Project/01_Trading_Analyser _&_LTT_Software_Primeval/2_Live Trading Tool"
 python3 -m streamlit run app.py --server.port 8502
 
 # Syntax check
@@ -321,5 +363,5 @@ git add app.py && git commit -m "msg" && git push
 
 ## Related Tools
 - `1_Trading_Analyser/` — post-session FIFO PnL engine. GitHub: `TruePrimeval/trading-analyser-private`
-- `11_Investing_Portfolio_Architect/` — Vite + React inverse risk weighting. Port 5173.
+- `Trading App Project/03_Investing_Portfolio_Architect/` — Vite + React inverse risk weighting. Port 5173.
 - Old shared Trading Analyser: `TruePrimeval/trading-analyser` (keep — others using it)

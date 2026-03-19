@@ -6,6 +6,11 @@ exchange_config.json
 session.json
 history.json
 prefs.json
+context_history.csv
+
+# Local backups & source screenshots
+Old_Repos_/
+Images/
 
 # Python
 __pycache__/

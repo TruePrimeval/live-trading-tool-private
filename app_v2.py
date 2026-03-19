@@ -1,7 +1,9 @@
 """
-Live Trading Tool — Day Trading Companion
+Primeval Trading Companion v2.0
 Session R:R logger · Active trade management · Pyramiding · Risk indicator
-Modes: Standard | Fabio Conservative Long Term | Fabio Competition
+The Primeval Session Loop: TUNE → MAP → HUNT → CLEAR
+State System: PRIME · GRIND · STATIC
+Modes: Standard | Secret Sauce Conservative | Secret Sauce Competition
 """
 
 import streamlit as st
@@ -48,11 +50,9 @@ _OKX_CONFIG_CANDIDATES = [
 ]
 
 # ─── SUPABASE CLIENT ─────────────────────────────────────────────────────────
-_LOCAL_DEV = os.environ.get("LTT_LOCAL", "0") == "1"
-
 @st.cache_resource
 def _get_sb():
-    if _LOCAL_DEV or not _HAS_SUPABASE:
+    if not _HAS_SUPABASE:
         return None
     try:
         return _sb_create(
@@ -73,7 +73,6 @@ _PREFS_DEFAULTS = {
     "morning_report_enabled": False,
     "safe_mode":              False,
     "connection_enabled":     False,  # kill switch — OFF by default
-    "user_tz_offset":         1,     # UTC offset in hours (default: UTC+1 / CET)
     "grades": {
         "AAA": {"label": "AAA — Mean Reversion",   "implied_r": 0.35},
         "AA":  {"label": "AA  — Breakout",         "implied_r": 0.25},
@@ -135,12 +134,16 @@ _SESSION_DEFAULTS = {
         "unit2_status":     None,
     },
     "morning_report": {
-        "completed":   False,
-        "grade":       None,
-        "multiplier":  1.0,
-        "score":       None,
-        "description": "",
-        "color":       "white",
+        "completed":      False,
+        "grade":          None,
+        "multiplier":     1.0,
+        "score":          None,
+        "description":    "",
+        "color":          "white",
+        # v2 — Primeval State System
+        "session_state":  None,   # PRIME / GRIND / STATIC
+        "mental_state":   None,   # PRIME / GRIND / STATIC (self-assessed)
+        "tactical_state": None,   # PRIME / GRIND / STATIC (self-assessed)
     },
     "checklist": {
         "phase1_complete": False,
@@ -164,185 +167,32 @@ _ASSET_DEFAULTS = {
 
 _MARKET_STATES = [
     "Normal Day",
-    "Normal Day Variation (Long)",
-    "Normal Day Variation (Short)",
+    "Normal Day Variation",
     "Inside Day",
-    "Trend Day (P-profile)",
-    "Trend Day (b-profile)",
+    "Trend Day (p profile)",
+    "Trend Day (b profile)",
     "Double Distribution",
+    "Balanced (Merged)",
 ]
 
-_VA_LOCATIONS = ["Above VAH", "Within VA", "Below VAL"]
-
-_TAIL_OPTIONS = [
-    "None",
-    "Strong Buying Tail (3+ TPOs)",
-    "Strong Selling Tail (3+ TPOs)",
-    "Weak/Poor Tail (1-2 TPOs)",
+_PRICE_LOCATIONS = [
+    "Within VA",
+    "Between VA absolute and VAH/VAL",
+    "Outside VA",
 ]
 
-_IB_OPTIONS = ["Normal IB", "Large IB", "Small IB"]
-
-# ── pbD Context Derivation ──────────────────────────────────────────────────
-
-# Direction scores: -2 strong short … 0 neutral … +2 strong long
-_DAY_TYPE_SCORE = {
-    "Normal Day": 0, "Normal Day Variation (Long)": 1, "Normal Day Variation (Short)": -1,
-    "Inside Day": 0, "Trend Day (P-profile)": 2, "Trend Day (b-profile)": -2,
-    "Double Distribution": 0,
-}
-_DAY_TYPE_STRUCTURE = {
-    "Normal Day": "MR", "Normal Day Variation (Long)": "MR", "Normal Day Variation (Short)": "MR",
-    "Inside Day": "MR", "Trend Day (P-profile)": "TR", "Trend Day (b-profile)": "TR",
-    "Double Distribution": "MR",
-}
-_TAIL_SCORE = {
-    "None": 0, "Strong Buying Tail (3+ TPOs)": 1,
-    "Strong Selling Tail (3+ TPOs)": -1, "Weak/Poor Tail (1-2 TPOs)": 0,
-}
-
-# Open/Close RELATIONSHIP matrix — close is dominant signal per pbD/Dalton
-# (open_loc, close_loc) → direction score
-_OPEN_CLOSE_SCORE = {
-    ("Above VAH", "Above VAH"):  2,   # Strong bullish — buyers maintained
-    ("Above VAH", "Within VA"): -1,   # Bearish rejection — buyers failed, returned to balance
-    ("Above VAH", "Below VAL"):  -2,  # Very bearish — complete reversal
-    ("Within VA",  "Above VAH"):  1,   # Bullish breakout during session
-    ("Within VA",  "Within VA"):   0,  # Neutral — balanced day
-    ("Within VA",  "Below VAL"):  -1,  # Bearish breakdown during session
-    ("Below VAL",  "Above VAH"):  2,   # Very bullish — complete reversal
-    ("Below VAL",  "Within VA"):   1,  # Bullish rejection — sellers failed, returned to balance
-    ("Below VAL",  "Below VAL"):  -2,  # Strong bearish — sellers maintained
-}
-
-def _derive_context(day_type, open_loc, close_loc, tail, ib_size):
-    """Derive daily context label + confidence % from 5 inputs.
-    Returns (label, confidence_pct, direction_score, structure).
-    Close location is the dominant signal (per pbD: close determines who controls next day).
-    Open/close relationship scored as combined signal.
-    """
-    _oc_score = _OPEN_CLOSE_SCORE.get((open_loc, close_loc), 0)
-    dir_score = (
-        _DAY_TYPE_SCORE.get(day_type, 0)
-        + _oc_score
-        + _TAIL_SCORE.get(tail, 0)
-    )
-    # Structure: Mean Reverting vs Trending
-    # IB is a strong confirming signal per pbD: small IB = "high probability trend day"
-    struct_day = _DAY_TYPE_STRUCTURE.get(day_type, "MR")
-    if ib_size == "Large IB":
-        struct_ib = "MR"
-    elif ib_size == "Small IB":
-        struct_ib = "TR"
-    else:
-        struct_ib = None  # Normal IB = neutral, no opinion
-
-    # Resolve structure: IB can override day type when it's a strong signal
-    _ib_conflict = False
-    if struct_ib is None:
-        structure = struct_day  # Normal IB → defer to day type
-    elif struct_day == struct_ib:
-        structure = struct_day  # Agreement → high confidence
-    else:
-        # Conflict: day type says one thing, IB says another
-        # Small IB overrides MR day types (course: "high probability of trend day")
-        # Large IB does NOT override trend day types (trend profiles are strongest signal)
-        if ib_size == "Small IB" and struct_day == "MR":
-            structure = "TR"  # Small IB upgrades to trend
+def _derive_scenario(price_location, outside_va_return):
+    """Returns (scenario_num, strategy) from price location + outside VA return question."""
+    if price_location == "Within VA":
+        return 1, "Mean Reversion"
+    elif price_location == "Between VA absolute and VAH/VAL":
+        return 2, "Mean Reversion"
+    elif price_location == "Outside VA":
+        if outside_va_return:
+            return 3, "Mean Reversion"
         else:
-            structure = struct_day  # Trend day type wins over large IB
-        _ib_conflict = True
-
-    # Small IB amplifies direction if trending
-    if ib_size == "Small IB" and structure == "TR":
-        dir_score += (1 if dir_score > 0 else -1 if dir_score < 0 else 0)
-
-    # Double Distribution: if open/close traversed both VAs (score ±2), upgrade to trending
-    if day_type == "Double Distribution" and abs(_oc_score) >= 2:
-        structure = "TR"
-
-    # Inside Day special case — don't trade aggressively, expect breakout
-    if day_type == "Inside Day":
-        # Inside Day + Small IB = very high probability of explosive breakout
-        if ib_size == "Small IB":
-            if dir_score > 0:
-                label = "BREAKOUT EXPECTED (LONG BIAS)"
-            elif dir_score < 0:
-                label = "BREAKOUT EXPECTED (SHORT BIAS)"
-            else:
-                label = "BREAKOUT EXPECTED"
-            return label, 40, dir_score, "ID"
-        else:
-            if dir_score > 0:
-                label = "CAUTION — INSIDE DAY (LONG BIAS)"
-            elif dir_score < 0:
-                label = "CAUTION — INSIDE DAY (SHORT BIAS)"
-            else:
-                label = "CAUTION — INSIDE DAY"
-            return label, 20, dir_score, "ID"
-
-    # Determine label
-    if structure == "MR":
-        if dir_score > 0:
-            label = "MEAN REVERTING LONG"
-        elif dir_score < 0:
-            label = "MEAN REVERTING SHORT"
-        else:
-            label = "MEAN REVERTING"
-    else:
-        if dir_score > 0:
-            label = "TREND LONG"
-        elif dir_score < 0:
-            label = "TREND SHORT"
-        else:
-            label = "TREND"
-
-    # Confidence scoring — 4 directional signals + IB structure agreement
-    _signals = [
-        _DAY_TYPE_SCORE.get(day_type, 0),    # day type direction
-        _oc_score,                             # open/close relationship (combined, dominant)
-        _TAIL_SCORE.get(tail, 0),             # tail direction
-        # IB direction signal
-        0 if ib_size == "Normal IB" else (1 if ib_size == "Small IB" and dir_score > 0 else (-1 if ib_size == "Small IB" and dir_score < 0 else 0)),
-    ]
-    # IB-day type agreement bonus/penalty
-    _ib_agreement = 0
-    if struct_ib is not None:
-        if struct_day == struct_ib:
-            _ib_agreement = 1  # Agreement → bonus confidence signal
-        else:
-            _ib_agreement = -1  # Conflict → penalty
-
-    if dir_score == 0:
-        agreeing = sum(1 for s in _signals if s == 0)
-    elif dir_score > 0:
-        agreeing = sum(1 for s in _signals if s > 0)
-    else:
-        agreeing = sum(1 for s in _signals if s < 0)
-    # Base confidence from 4 directional signals
-    confidence = int(round(agreeing / 4 * 100))
-    # IB structure agreement adjusts confidence ±15%
-    confidence = max(0, min(100, confidence + _ib_agreement * 15))
-
-    return label, confidence, dir_score, structure
-
-def _context_color(label):
-    """Return CSS color for a context label."""
-    if "BREAKOUT" in label:
-        return "#a855f7"  # purple — explosive move expected
-    elif "CAUTION" in label:
-        return "#f59e0b"  # amber warning
-    elif "TREND LONG" in label:
-        return "#22c55e"
-    elif "TREND SHORT" in label:
-        return "#ef4444"
-    elif "LONG" in label:
-        return "#3b82f6"
-    elif "SHORT" in label:
-        return "#f97316"
-    elif label == "TREND":
-        return "#a855f7"
-    return "#94a3b8"
+            return 4, "Breakout"
+    return 1, "Mean Reversion"
 
 def _schematic_for_market_state(market_state):
     """Return path to schematic PNG for a given market state."""
@@ -352,143 +202,11 @@ def _schematic_for_market_state(market_state):
     p3 = os.path.join(_assets_dir, "pbd_schematic_p3.png")
     if market_state in ("Normal Day", "Normal Day Variation", "Inside Day"):
         return p1
-    elif market_state in ("Trend Day (P-profile)", "Trend Day (b-profile)", "Double Distribution"):
+    elif market_state in ("Trend Day (p profile)", "Trend Day (b profile)", "Double Distribution", "Balanced (Merged)"):
         return p2
     return None
 
-# ─── TIMEZONE HELPER ─────────────────────────────────────────────────────────
-
-def _current_et_offset():
-    """Return current ET UTC offset: -4 (EDT, Mar-Nov) or -5 (EST, Nov-Mar)."""
-    now = datetime.now()
-    y = now.year
-    # DST: second Sunday of March 2:00 AM → first Sunday of November 2:00 AM
-    mar1_wd = datetime(y, 3, 1).weekday()  # 0=Mon
-    mar_sun2 = 8 + (6 - mar1_wd) % 7 if mar1_wd != 6 else 8
-    nov1_wd = datetime(y, 11, 1).weekday()
-    nov_sun1 = 1 + (6 - nov1_wd) % 7 if nov1_wd != 6 else 1
-    dst_start = datetime(y, 3, mar_sun2, 2)
-    dst_end = datetime(y, 11, nov_sun1, 2)
-    return -4 if dst_start <= now < dst_end else -5
-
-def _et_to_local(et_time_str, user_tz_offset):
-    """Convert a time string like '08:30' from ET to user's local timezone. Returns 'HH:MM'."""
-    try:
-        parts = et_time_str.strip().replace(".", ":").split(":")
-        h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
-        et_off = _current_et_offset()
-        utc_h = h - et_off
-        local_h = (utc_h + user_tz_offset) % 24
-        return f"{local_h:02d}:{m:02d}"
-    except Exception:
-        return et_time_str
-
-def _now_et_minutes():
-    """Return current time as minutes-since-midnight in ET."""
-    from datetime import timezone, timedelta
-    et_off = _current_et_offset()
-    now_utc = datetime.now(timezone.utc)
-    et_now = now_utc + timedelta(hours=et_off)
-    return et_now.hour * 60 + et_now.minute
-
-def _ib_timer_info():
-    """Return IB timer state for futures.
-    Returns dict: {status, label, minutes_left, pct, color}
-    status: 'pre_market' | 'ib_active' | 'ib_complete' | 'market_closed'
-    """
-    et_mins = _now_et_minutes()
-    mkt_open = 9 * 60 + 30   # 9:30 ET
-    ib_end = 10 * 60          # 10:00 ET
-    mkt_close = 16 * 60       # 4:00 PM ET
-
-    if et_mins < mkt_open:
-        mins_to_open = mkt_open - et_mins
-        h, m = divmod(mins_to_open, 60)
-        return {
-            "status": "pre_market",
-            "label": f"Market opens in {h}h {m:02d}m",
-            "minutes_left": mins_to_open,
-            "pct": 0,
-            "color": "#4b5a7a",
-        }
-    elif et_mins < ib_end:
-        mins_left = ib_end - et_mins
-        pct = (30 - mins_left) / 30
-        return {
-            "status": "ib_active",
-            "label": f"IB Active — {mins_left} min remaining",
-            "minutes_left": mins_left,
-            "pct": pct,
-            "color": "#f97316",
-        }
-    elif et_mins < mkt_close:
-        return {
-            "status": "ib_complete",
-            "label": "IB Complete",
-            "minutes_left": 0,
-            "pct": 1.0,
-            "color": "#22c55e",
-        }
-    else:
-        return {
-            "status": "market_closed",
-            "label": "Market Closed",
-            "minutes_left": 0,
-            "pct": 0,
-            "color": "#4b5a7a",
-        }
-
-def _news_window_status(local_time_str):
-    """Check if a news event window is active, expired, or upcoming.
-    Returns 'active' (within ±30min), 'expired' (>30min after), or 'upcoming' (>30min before).
-    """
-    try:
-        parts = local_time_str.split(":")
-        ev_h, ev_m = int(parts[0]), int(parts[1])
-        now_mins = datetime.now().hour * 60 + datetime.now().minute
-        ev_mins = ev_h * 60 + ev_m
-        diff = now_mins - ev_mins
-        if diff > 30:
-            return "expired"
-        elif diff < -30:
-            return "upcoming"
-        else:
-            return "active"
-    except Exception:
-        return "active"  # fail safe — assume active
-
-# ─── CONTEXT HISTORY CSV ─────────────────────────────────────────────────────
-_CONTEXT_CSV = os.path.join(_APP_DIR, "context_history.csv")
-_CONTEXT_CSV_HEADER = "date,asset,day_type,open_location,close_location,tail,ib_size,context_label,confidence,direction_score,structure"
-
-def _log_context(asset_name, phase2_data):
-    """Append a row to context_history.csv when Phase 2 is confirmed."""
-    import csv
-    _exists = os.path.exists(_CONTEXT_CSV)
-    with open(_CONTEXT_CSV, "a", newline="") as f:
-        w = csv.writer(f)
-        if not _exists:
-            w.writerow(_CONTEXT_CSV_HEADER.split(","))
-        w.writerow([
-            str(date.today()),
-            asset_name,
-            phase2_data.get("day_type", ""),
-            phase2_data.get("open_location", ""),
-            phase2_data.get("close_location", ""),
-            phase2_data.get("tail", ""),
-            phase2_data.get("ib_size", ""),
-            phase2_data.get("context_label", ""),
-            phase2_data.get("confidence", ""),
-            phase2_data.get("direction_score", ""),
-            phase2_data.get("structure", ""),
-        ])
-
-def _get_asset_context(instrument, checklist_assets):
-    """Return the Phase 2 context dict for an instrument, or None if not found."""
-    for a in checklist_assets:
-        if a.get("name") == instrument and a.get("phase2_complete"):
-            return a.get("phase2", {})
-    return None
+_SCENARIO_SCHEMATIC = os.path.join(_APP_DIR, "assets", "pbd_schematic_p3.png")
 
 def _load_history():
     sb = _get_sb()
@@ -766,91 +484,6 @@ def _fetch_last_close():
     except Exception as e:
         return None, None, str(e)
 
-def _fetch_todays_orders(cfg):
-    """Fetch today's filled SWAP orders from OKX REST API.
-    Returns (list_of_orders, open_positions, error_str).
-    Each order: {instId, side, sz, avgPx, pnl, fee, fillTime, state}
-    """
-    if not cfg.get("api_key"):
-        return [], [], "No API credentials"
-    if cfg.get("exchange", "OKX") != "OKX":
-        return [], [], f"REST sync only for OKX. Use CSV for {cfg['exchange']}."
-    errors = []
-    orders_out = []
-    positions_out = []
-
-    # 1. Fetch filled orders (today)
-    try:
-        path = "/api/v5/trade/orders-history?instType=SWAP&state=filled&limit=100"
-        ts   = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        sig  = base64.b64encode(
-            hmac.new(cfg["secret_key"].encode(), f"{ts}GET{path}".encode(), hashlib.sha256).digest()
-        ).decode()
-        hdrs = {
-            "OK-ACCESS-KEY":        cfg["api_key"],
-            "OK-ACCESS-SIGN":       sig,
-            "OK-ACCESS-TIMESTAMP":  ts,
-            "OK-ACCESS-PASSPHRASE": cfg.get("passphrase", ""),
-            "Content-Type":         "application/json",
-        }
-        resp = requests.get(f"https://www.okx.com{path}", headers=hdrs, timeout=10).json()
-        if resp.get("code") != "0":
-            errors.append(resp.get("msg", "OKX API error"))
-        else:
-            today_str = str(date.today())
-            for o in resp.get("data", []):
-                fill_ts = int(o.get("fillTime") or o.get("uTime") or 0)
-                if fill_ts > 0:
-                    fill_date = datetime.utcfromtimestamp(fill_ts / 1000).strftime("%Y-%m-%d")
-                else:
-                    fill_date = ""
-                if fill_date == today_str:
-                    orders_out.append({
-                        "instId":   o.get("instId", ""),
-                        "side":     o.get("side", ""),
-                        "sz":       o.get("sz", ""),
-                        "avgPx":    o.get("avgPx", ""),
-                        "pnl":      float(o.get("pnl") or 0),
-                        "fee":      float(o.get("fee") or 0),
-                        "fillTime": fill_date,
-                        "fillTs":   fill_ts,
-                        "ordType":  o.get("ordType", ""),
-                    })
-    except Exception as e:
-        errors.append(f"Orders: {e}")
-
-    # 2. Fetch open positions
-    try:
-        path2 = "/api/v5/account/positions?instType=SWAP"
-        ts2   = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        sig2  = base64.b64encode(
-            hmac.new(cfg["secret_key"].encode(), f"{ts2}GET{path2}".encode(), hashlib.sha256).digest()
-        ).decode()
-        hdrs2 = {
-            "OK-ACCESS-KEY":        cfg["api_key"],
-            "OK-ACCESS-SIGN":       sig2,
-            "OK-ACCESS-TIMESTAMP":  ts2,
-            "OK-ACCESS-PASSPHRASE": cfg.get("passphrase", ""),
-            "Content-Type":         "application/json",
-        }
-        resp2 = requests.get(f"https://www.okx.com{path2}", headers=hdrs2, timeout=10).json()
-        if resp2.get("code") == "0":
-            for p in resp2.get("data", []):
-                pos_sz = float(p.get("pos") or 0)
-                if pos_sz != 0:
-                    positions_out.append({
-                        "instId":  p.get("instId", ""),
-                        "side":    "long" if pos_sz > 0 else "short",
-                        "sz":      abs(pos_sz),
-                        "avgPx":   p.get("avgPx", ""),
-                        "upl":     float(p.get("upl") or 0),
-                        "lever":   p.get("lever", ""),
-                    })
-    except Exception as e:
-        errors.append(f"Positions: {e}")
-
-    return orders_out, positions_out, "; ".join(errors) if errors else None
-
 # ─── WEBSOCKET ENGINE ────────────────────────────────────────────────────────
 # Module-level shared state — survives Streamlit reruns, shared across tabs
 _WS_LOCK  = threading.Lock()
@@ -1069,7 +702,7 @@ def _win_prob(grade="AA"):
     """Expected win probability based on grade type (from research)."""
     return _GRADE_WIN_RATES.get(grade, 0.38)
 
-# ─── MORNING REPORT CARD DATA ────────────────────────────────────────────────
+# ─── TUNE-IN DATA (v2 — Primeval Session Loop: TUNE phase) ───────────────────
 _MR_QUESTIONS = [
     ("sleep",     "Sleep quality last night",         ["Excellent", "Good", "Poor", "Terrible"],       [3, 2, 1, 0]),
     ("energy",    "Energy & focus level",              ["High", "Normal", "Low", "Depleted"],           [3, 2, 1, 0]),
@@ -1078,6 +711,28 @@ _MR_QUESTIONS = [
     ("distract",  "Outside distractions today",        ["None", "Minor", "Significant", "Major"],       [3, 2, 1, 0]),
     ("clarity",   "Mental clarity & decision-making",  ["Sharp", "Normal", "Foggy", "Scattered"],       [3, 2, 1, 0]),
 ]
+
+# v2 — Self-assessed state inputs (Mental Game + Tactical Readiness)
+# Options map to: PRIME / GRIND / STATIC
+_STATE_OPTIONS = {
+    "mental": {
+        "label": "Mental game right now",
+        "choices": [
+            ("PRIME",  "PRIME — Calm, focused, trusting the plan"),
+            ("GRIND",  "GRIND — Functional but not fully locked in"),
+            ("STATIC", "STATIC — Off, scattered, emotionally reactive"),
+        ],
+    },
+    "tactical": {
+        "label": "Tactical readiness",
+        "choices": [
+            ("PRIME",  "PRIME — Clear scenario, levels marked, plan set"),
+            ("GRIND",  "GRIND — Plan exists but gaps or uncertainty"),
+            ("STATIC", "STATIC — Unprepared, no clear read on market"),
+        ],
+    },
+}
+
 # (min_score, grade, multiplier, css_class, description)
 _MR_GRADES = [
     (16, "A",  1.00, "mr-grade-A",  "Press hard — ideal conditions"),
@@ -1087,6 +742,26 @@ _MR_GRADES = [
     ( 4, "D",  0.10, "mr-grade-D",  "Defensive only — protect capital"),
     ( 0, "F",  0.00, "mr-grade-F",  "Do not trade today"),
 ]
+
+# v2 — Map MRC grade to Primeval Session State
+def _grade_to_state(grade):
+    return {"A": "PRIME", "B+": "GRIND", "B": "GRIND"}.get(grade, "STATIC")
+
+# v2 — Derive final session state from grade + mental + tactical self-assessment
+def _derive_session_state(grade, mental, tactical):
+    """STATIC wins any tie. PRIME requires grade A + both self-ratings PRIME."""
+    grade_state = _grade_to_state(grade)
+    if grade_state == "STATIC" or mental == "STATIC" or tactical == "STATIC":
+        return "STATIC"
+    if grade_state == "PRIME" and mental == "PRIME" and tactical == "PRIME":
+        return "PRIME"
+    return "GRIND"
+
+_SESSION_STATE_META = {
+    "PRIME":  {"css": "state-prime",  "color": "#22c55e", "desc": "Peak state. Sharp, calm, trusting the plan. Full throttle."},
+    "GRIND":  {"css": "state-grind",  "color": "#f59e0b", "desc": "Functional. Proceed with caution and reduced size."},
+    "STATIC": {"css": "state-static", "color": "#ef4444", "desc": "Signal blocked. Protect capital. Consider sitting out."},
+}
 
 def _mr_grade(score):
     for threshold, grade, mult, css, desc in _MR_GRADES:
@@ -1106,17 +781,17 @@ def _session_losses_r(trades):
 
 # ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Live Trading Tool",
+    page_title="Primeval Trading Companion v2",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ─── PASSWORD GATE ────────────────────────────────────────────────────────────
-if not _LOCAL_DEV and not st.session_state.get("_auth"):
+if not st.session_state.get("_auth"):
     _pwd = st.text_input("Password", type="password", key="_pwd")
     if _pwd:
-        if _pwd == st.secrets.get("app", {}).get("password", "Prime_LTT_01"):
+        if _pwd == st.secrets.get("app", {}).get("password", ""):
             st.session_state["_auth"] = True
             st.rerun()
         else:
@@ -1327,33 +1002,47 @@ h3 { color: #e2e8f0 !important; }
     text-align: center; letter-spacing: 0.04em; margin-bottom: 12px;
 }
 
-/* Asset tabs — big, clean, active border */
-[data-testid="stTabs"] [data-baseweb="tab-list"] {
-    gap: 0; background: transparent; border-bottom: 1px solid #1e2a45;
+/* ── Primeval State System (v2) ────────────────────────────────────────────── */
+.state-prime  { color: #22c55e; }
+.state-grind  { color: #f59e0b; }
+.state-static { color: #ef4444; }
+
+.state-badge {
+    display: flex; align-items: center; justify-content: center; gap: 14px;
+    border-radius: 12px; padding: 16px 24px; margin: 12px 0;
 }
-[data-testid="stTabs"] [data-baseweb="tab"] {
-    background: #0a0e18; color: #4b5a7a; font-size: 0.85rem; font-weight: 700;
-    letter-spacing: 0.06em; text-transform: uppercase;
-    padding: 14px 28px; border: 1px solid #1e2a45; border-bottom: none;
-    border-radius: 10px 10px 0 0; margin-right: 4px;
-    transition: all 0.15s ease;
+.state-badge-prime  { background: #051a0a; border: 2px solid #22c55e; }
+.state-badge-grind  { background: #1a1200; border: 2px solid #f59e0b; }
+.state-badge-static { background: #1a0505; border: 2px solid #ef4444; }
+
+.state-label {
+    font-size: 2.6rem; font-weight: 900; letter-spacing: 0.08em;
+    line-height: 1; text-transform: uppercase;
 }
-[data-testid="stTabs"] [data-baseweb="tab"]:hover {
-    background: #0e1220; color: #94a3b8;
+.state-meta { text-align: left; }
+.state-meta-name {
+    font-size: 0.6rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .14em; color: #4b5a7a; margin-bottom: 3px;
 }
-[data-testid="stTabs"] [data-baseweb="tab"][aria-selected="true"] {
-    background: #0e1220; color: #e2e8f0;
-    border-color: #3b82f6; border-top: 2px solid #3b82f6;
+.state-meta-desc { font-size: 0.8rem; color: #94a3b8; line-height: 1.4; }
+
+/* Session loop phase labels */
+.loop-phase-row {
+    display: flex; gap: 6px; margin: 10px 0 18px; justify-content: center;
 }
-[data-testid="stTabs"] [data-baseweb="tab-highlight"] {
-    display: none;
+.loop-phase {
+    flex: 1; max-width: 120px; padding: 8px 10px; text-align: center;
+    background: #0a0e18; border: 1px solid #1a2238; border-radius: 8px;
+    font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .1em; color: #2a3a5a;
 }
-[data-testid="stTabs"] [data-baseweb="tab-border"] {
-    display: none;
+.loop-phase.lp-active {
+    border-color: #3b82f6; color: #93c5fd;
+    background: #05101a;
 }
-[data-testid="stTabs"] [data-testid="stTabContent"] {
-    background: #0e1220; border: 1px solid #1e2a45; border-top: none;
-    border-radius: 0 0 10px 10px; padding: 16px 20px;
+.loop-phase.lp-done {
+    border-color: #16a34a; color: #4ade80;
+    background: #051a0a;
 }
 
 /* Decision section boxes */
@@ -1401,41 +1090,6 @@ h3 { color: #e2e8f0 !important; }
     border-radius: 10px; color: #4b5a7a;
     font-size: 0.88rem; font-weight: 600; margin: 12px 0;
 }
-
-/* IB Timer */
-.ib-timer {
-    display: flex; align-items: center; gap: 12px;
-    background: #0a0e18; border: 1px solid #1e2a45;
-    border-radius: 10px; padding: 12px 20px;
-    margin: 0 0 16px; justify-content: center;
-}
-.ib-timer-dot {
-    width: 10px; height: 10px; border-radius: 50%;
-}
-.ib-timer-label {
-    font-size: 0.82rem; font-weight: 700;
-    letter-spacing: 0.04em; text-transform: uppercase;
-}
-.ib-bar-bg { background: #1a2238; border-radius: 4px; height: 6px; width: 120px; overflow: hidden; }
-.ib-bar-fill { height: 6px; border-radius: 4px; transition: width 0.3s; }
-@keyframes ib-pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
-.ib-pulse { animation: ib-pulse 1.5s ease-in-out infinite; }
-
-/* P/b Setup stages */
-.setup-stage {
-    flex: 1; min-width: 100px; background: #0a0e18;
-    border: 1px solid #1a2238; border-radius: 8px;
-    padding: 12px 14px; text-align: center;
-}
-.setup-stage.active { border-color: #f97316; }
-.setup-stage.done { border-color: #22c55e; }
-.setup-stage-lbl {
-    font-size: 0.6rem; color: #4b5a7a; text-transform: uppercase;
-    letter-spacing: .08em; font-weight: 600;
-}
-.setup-stage-val {
-    font-size: 0.9rem; font-weight: 700; margin-top: 4px;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1456,12 +1110,6 @@ else:
         _WS_STATE["auth_failed"] = True
         _WS_STATE["connected"]   = False
         _WS_STATE["connecting"]  = False
-
-# IB timer autorefresh — only during active IB period (every 30s)
-if _HAS_AUTOREFRESH and not _conn_enabled:
-    _ib_info = _ib_timer_info()
-    if _ib_info["status"] == "ib_active":
-        _autorefresh(interval=30000, key="ib_timer_poll")
 
 # ─── PROCESS PENDING WS EVENTS ───────────────────────────────────────────────
 with _WS_LOCK:
@@ -1504,49 +1152,28 @@ if _ws_pending_close and session.get("active_trades"):
 
 # ─── SIDEBAR ─────────────────────────────────────────────────────────────────
 with st.sidebar:
-    # ── SYNC BUTTON (large, top of sidebar) ──
-    if st.button("SYNC EXCHANGE DATA", width="stretch", type="primary", key="sync_btn"):
-        _sync_cfg = _load_ex_cfg()
-        if _LOCAL_DEV:
-            st.error("Sync disabled in local dev mode (VPN safe). Deploy to cloud to sync.")
-        elif not _sync_cfg.get("api_key"):
-            st.error("No API credentials — configure in Exchange & API below.")
-        elif not prefs.get("connection_enabled", False):
-            st.error("Enable connections first (toggle below).")
-        else:
-            with st.spinner("Syncing..."):
-                _s_orders, _s_positions, _s_err = _fetch_todays_orders(_sync_cfg)
-            if _s_err:
-                st.warning(f"Sync warning: {_s_err}")
-            st.session_state["_sync_orders"] = _s_orders
-            st.session_state["_sync_positions"] = _s_positions
-            st.session_state["_sync_ts"] = datetime.now().strftime("%H:%M:%S")
-            if _s_orders or _s_positions:
-                st.success(f"Synced: {len(_s_orders)} fills today, {len(_s_positions)} open positions")
-            else:
-                st.info("No fills today, no open positions.")
-
-    # ── CONNECTION KILL SWITCH ──
+    # ── CONNECTION KILL SWITCH (top of sidebar, always visible) ──
     _conn_current = prefs.get("connection_enabled", False)
-    _conn_label   = "CONNECTED" if _conn_current else "OFFLINE"
+    _conn_label   = "🟢 CONNECTED — click to disconnect" if _conn_current else "🔴 OFFLINE MODE — click to connect"
     _conn_style   = "background:#14532d;border:2px solid #22c55e;" if _conn_current else "background:#1c0a0a;border:2px solid #ef4444;"
     st.markdown(
-        f'<div style="{_conn_style}border-radius:8px;padding:10px 16px;margin:8px 0;'
-        f'text-align:center;font-size:0.7rem;font-weight:800;letter-spacing:.06em;color:#e2e8f0">'
+        f'<div style="{_conn_style}border-radius:8px;padding:12px 16px;margin-bottom:14px;'
+        f'text-align:center;font-size:0.8rem;font-weight:800;letter-spacing:.06em;color:#e2e8f0">'
         f'{_conn_label}</div>',
         unsafe_allow_html=True,
     )
     if st.button(
         "ENABLE SYNC" if not _conn_current else "KILL ALL CONNECTIONS",
-        width="stretch",
+        use_container_width=True,
         type="primary" if not _conn_current else "secondary",
         key="kill_switch_btn",
     ):
         prefs["connection_enabled"] = not _conn_current
         _save_prefs(prefs)
         if _conn_current:
+            # Immediately kill WS thread
             with _WS_LOCK:
-                _WS_STATE["auth_failed"]  = True
+                _WS_STATE["auth_failed"]  = True   # stops retry loop
                 _WS_STATE["connected"]    = False
                 _WS_STATE["connecting"]   = False
                 _WS_STATE["last_error"]   = "Disconnected by kill switch"
@@ -1580,43 +1207,31 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.markdown("### Morning Report Card")
+    st.markdown("### TUNE — Pre-Session")
     if not new_safe_mode:
         _mr_enabled_current = prefs.get("morning_report_enabled", False)
         new_mr_enabled = st.checkbox(
-            "Enable daily performance check-in",
+            "Enable pre-session calibration",
             value=_mr_enabled_current,
-            help="Grade yourself each morning — your grade adjusts today's effective loss limit",
+            help="Set your PRIME / GRIND / STATIC state — adjusts today's effective loss limit",
         )
         if new_mr_enabled != _mr_enabled_current:
             prefs["morning_report_enabled"] = new_mr_enabled
             _save_prefs(prefs)
     else:
         new_mr_enabled = prefs.get("morning_report_enabled", False)
-        st.caption("Phase 1 of Safe Mode — always required")
+        st.caption("TUNE phase — required before MAP and HUNT")
     # Show compact result in sidebar when completed
     _sb_mr = session.get("morning_report", {})
     if (new_mr_enabled or new_safe_mode) and _sb_mr.get("completed"):
         _sb_grade = _sb_mr.get("grade", "?")
         _sb_mult  = _sb_mr.get("multiplier", 1.0)
+        _sb_state = _sb_mr.get("session_state", "")
         _sb_desc  = _sb_mr.get("description", "")
-        st.caption(f"Today: **{_sb_grade}** → {_sb_mult*100:.0f}% of daily limit · {_sb_desc}")
-
-    st.divider()
-    st.markdown("### Timezone & Region")
-    _tz_options = list(range(-12, 15))
-    _tz_labels = [f"UTC{'+' if o >= 0 else ''}{o}" for o in _tz_options]
-    _tz_current = prefs.get("user_tz_offset", 1)
-    _tz_idx = _tz_options.index(_tz_current) if _tz_current in _tz_options else _tz_options.index(1)
-    new_tz_offset = st.selectbox(
-        "Your timezone (UTC offset)",
-        _tz_options,
-        index=_tz_idx,
-        format_func=lambda x: f"UTC{'+' if x >= 0 else ''}{x}",
-    )
-    _et_now = _current_et_offset()
-    _et_lbl = "EDT (UTC-4)" if _et_now == -4 else "EST (UTC-5)"
-    st.caption(f"US markets: {_et_lbl} · NY 9:30 = your {_et_to_local('09:30', new_tz_offset)}")
+        if _sb_state:
+            st.caption(f"State: **{_sb_state}** · Grade {_sb_grade} · {_sb_mult*100:.0f}% limit · {_sb_desc}")
+        else:
+            st.caption(f"Today: **{_sb_grade}** → {_sb_mult*100:.0f}% of daily limit · {_sb_desc}")
 
     st.divider()
     st.markdown("### Account")
@@ -1653,7 +1268,7 @@ with st.sidebar:
         value=float(prefs["addon_r"]), step=0.05, format="%.2f",
     )
 
-    if st.button("Save Settings", width="stretch"):
+    if st.button("Save Settings", use_container_width=True):
         prefs["balance"]                = new_balance
         prefs["r_pct"]                  = new_r_pct
         prefs["daily_limit_r"]          = new_daily_limit
@@ -1661,7 +1276,6 @@ with st.sidebar:
         prefs["mode"]                   = mode
         prefs["fabio_submode"]          = fabio_submode or prefs.get("fabio_submode", "Conservative Mode")
         prefs["morning_report_enabled"] = new_mr_enabled
-        prefs["user_tz_offset"]         = new_tz_offset
         for gk, gv in grade_updates.items():
             prefs["grades"][gk]["implied_r"] = gv
         session["balance_override"] = new_balance
@@ -1684,12 +1298,12 @@ with st.sidebar:
                                    help="OKX only — leave blank for other exchanges")
         _ex_c1, _ex_c2 = st.columns(2)
         with _ex_c1:
-            if st.button("Save Credentials", width="stretch"):
+            if st.button("Save Credentials", use_container_width=True):
                 _save_ex_cfg({"exchange": _ex_sel, "api_key": _api_key,
                                "secret_key": _sec_key, "passphrase": _pass})
                 st.success("Saved")
         with _ex_c2:
-            if st.button("Test Connection", width="stretch", type="secondary"):
+            if st.button("Test Connection", use_container_width=True, type="secondary"):
                 if not prefs.get("connection_enabled", False):
                     st.error("Enable connections first (kill switch is OFF)")
                 else:
@@ -1702,7 +1316,7 @@ with st.sidebar:
     st.divider()
     st.markdown("### Session")
     st.caption(f"Date: {session['session_date']}")
-    if st.button("Reset Session", width="stretch", type="secondary"):
+    if st.button("Reset Session", use_container_width=True, type="secondary"):
         ns = {**_SESSION_DEFAULTS}
         ns["session_date"]    = str(date.today())
         ns["balance_override"] = new_balance
@@ -1791,9 +1405,60 @@ for _ot in active_trades:
 # ─── PAGE TITLE ──────────────────────────────────────────────────────────────
 st.markdown(
     '<h1 style="font-size:2.4rem;font-weight:900;letter-spacing:0.04em;'
-    'color:#e2e8f0;margin:0 0 18px 0;line-height:1;text-align:center">Trading Tool</h1>',
+    'color:#e2e8f0;margin:0 0 6px 0;line-height:1;text-align:center">Primeval Trading</h1>'
+    '<div style="text-align:center;font-size:0.62rem;color:#2a3a5a;letter-spacing:.18em;'
+    'font-weight:700;text-transform:uppercase;margin-bottom:18px">v2.0 · The Session Loop</div>',
     unsafe_allow_html=True,
 )
+
+# ─── SESSION LOOP PHASE BAR ───────────────────────────────────────────────────
+# Determine current loop phase for display
+_loop_tune     = cl_phase1 if safe_mode else True           # TUNE complete once MRC done
+_loop_map      = cl_any_ready if safe_mode else True        # MAP complete once assets ready
+_loop_hunt     = bool(active_trades) or bool(completed)     # HUNT = any trade activity
+_loop_clear    = not active_trades and bool(completed)      # CLEAR = all trades closed
+
+def _lp_cls(done, active):
+    if done:    return "lp-done"
+    if active:  return "lp-active"
+    return ""
+
+_lp_tune_cls  = _lp_cls(_loop_tune,  not _loop_tune)
+_lp_map_cls   = _lp_cls(_loop_map,   _loop_tune and not _loop_map)
+_lp_hunt_cls  = _lp_cls(_loop_clear, _loop_map  and not _loop_hunt)
+_lp_clear_cls = _lp_cls(_loop_clear, _loop_hunt and not active_trades and bool(completed))
+
+st.markdown(
+    f'<div class="loop-phase-row">'
+    f'<div class="loop-phase {_lp_tune_cls}">TUNE</div>'
+    f'<div class="loop-phase {_lp_map_cls}">MAP</div>'
+    f'<div class="loop-phase {_lp_hunt_cls}">HUNT</div>'
+    f'<div class="loop-phase {_lp_clear_cls}">CLEAR</div>'
+    f'</div>',
+    unsafe_allow_html=True,
+)
+
+# ─── SESSION STATE BADGE (v2) — shown once Tune-In is complete ───────────────
+_ss_val = morning_report.get("session_state")
+if _ss_val and _ss_val in _SESSION_STATE_META:
+    _ss_meta  = _SESSION_STATE_META[_ss_val]
+    _ss_cls   = _ss_meta["css"]
+    _ss_color = _ss_meta["color"]
+    _ss_desc  = _ss_meta["desc"]
+    _mental   = morning_report.get("mental_state", "—")
+    _tactical = morning_report.get("tactical_state", "—")
+    st.markdown(
+        f'<div class="state-badge state-badge-{_ss_val.lower()}">'
+        f'<div class="state-label {_ss_cls}">{_ss_val}</div>'
+        f'<div class="state-meta">'
+        f'<div class="state-meta-name">Today\'s State</div>'
+        f'<div class="state-meta-desc">{_ss_desc}</div>'
+        f'<div style="margin-top:6px;font-size:0.62rem;color:#4b5a7a;">'
+        f'Mental: <span style="color:{_ss_color};font-weight:700">{_mental}</span>'
+        f' &nbsp;·&nbsp; Tactical: <span style="color:{_ss_color};font-weight:700">{_tactical}</span>'
+        f'</div></div></div>',
+        unsafe_allow_html=True,
+    )
 
 # ─── PHASES (safe mode = Phase 1 card + per-asset Phase 2/3 + news events) ──────
 if safe_mode:
@@ -1813,887 +1478,450 @@ if safe_mode:
                    "border-radius:10px;padding:16px 18px;"
                    "display:flex;flex-direction:column;align-items:center;text-align:center;gap:5px")
 
-    # ── Phase 1 ──
-    # If complete, collapse into expander; if not, show full
+    # ── TUNE phase decision box ──
+    st.markdown('<div class="decision-box">', unsafe_allow_html=True)
+    st.markdown('<div class="decision-hdg">TUNE · Pre-Session Calibration</div>', unsafe_allow_html=True)
     if cl_phase1:
-        with st.expander(f"Phase 1 — ✓ Grade {_mr_g} · {_mr_desc} · {_limit_line}", expanded=False):
-            _p1_html = (
-                f'<div style="{_CARD_STYLE.format(bc="#3b82f6")}">'
-                f'<div class="checklist-badge-done" style="margin:0 auto">✓ Morning Report Card Complete</div>'
-                f'<div style="{_LBL}">Grade</div>'
-                f'<div style="font-size:2.2rem;font-weight:800;line-height:1" class="{_mr_css}">{_mr_g}</div>'
-                f'<div style="font-size:0.75rem;color:#94a3b8">{_mr_desc}</div>'
-                f'<div style="{_LBL};margin-top:4px">Score <span style="color:#e2e8f0;font-weight:700">{_mr_sc}/18</span>'
-                f' · {_limit_line}</div>'
-                f'</div>'
-            )
-            st.markdown(_p1_html, unsafe_allow_html=True)
-            if _mr_g == "F":
-                st.markdown(
-                    '<div class="mr-no-trade">MORNING GRADE: F — DO NOT TRADE TODAY · Protect capital.</div>',
-                    unsafe_allow_html=True,
-                )
-            st.markdown('<div style="margin-top:12px"></div>', unsafe_allow_html=True)
-            _p1_lpad, _p1_rc, _p1_rpad = st.columns([2, 1, 2])
-            with _p1_rc:
-                if st.button("↩ Redo Check-In", key="redo_p1_sm", width="stretch"):
-                    session["morning_report"] = {**_SESSION_DEFAULTS["morning_report"]}
-                    checklist["phase1_complete"] = False
-                    checklist["assets"] = []
-                    session["checklist"] = checklist
-                    _save_session(session)
-                    st.rerun()
-    else:
-        st.markdown("""
-        <div class="sec-hdr">
-          <div class="sec-line"></div>
-          <div class="sec-title">Phase 1</div>
-          <div class="sec-line"></div>
-        </div>
-        <div style="text-align:center;font-size:0.7rem;color:#4b5a7a;text-transform:uppercase;letter-spacing:.1em;font-weight:600;margin:-12px 0 16px">Human Performance Check-In</div>""", unsafe_allow_html=True)
-        st.markdown(
+        _ss_done    = morning_report.get("session_state")
+        _ss_meta_d  = _SESSION_STATE_META.get(_ss_done, {})
+        _ss_css_d   = _ss_meta_d.get("css", "white")
+        _ss_desc_d  = _ss_meta_d.get("desc", "")
+        _p1_html = (
             f'<div style="{_CARD_STYLE.format(bc="#3b82f6")}">'
-            f'<div class="checklist-badge" style="margin:0 auto">Phase 1 — Human Performance</div>'
-            f'<div style="font-size:0.88rem;color:#4b5a7a;margin-top:8px">○ Answer 6 questions to set your daily grade</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-        with st.form("morning_report_form"):
-            qc1, qc2 = st.columns(2)
-            for i, (qkey, qlabel, qopts, _) in enumerate(_MR_QUESTIONS):
-                with (qc1 if i < 3 else qc2):
-                    st.selectbox(qlabel, qopts, key=f"mr_q_{qkey}")
-            if st.form_submit_button("Submit Phase 1 →", width="stretch"):
-                _total = 0
-                for qkey, _, qopts, qscores in _MR_QUESTIONS:
-                    sel = st.session_state.get(f"mr_q_{qkey}", qopts[0])
-                    idx = qopts.index(sel) if sel in qopts else 0
-                    _total += qscores[idx]
-                _grade, _mult, _css, _desc = _mr_grade(_total)
-                session["morning_report"] = {
-                    "completed": True, "grade": _grade, "multiplier": _mult,
-                    "score": _total, "description": _desc, "color": _css,
-                }
-                _save_session(session)
-                st.rerun()
-    if cl_phase1:
-        # Check if all pre-trade phases are complete
-        _all_p2_done = cl_assets and all(a.get("phase2_complete") for a in cl_assets)
-        _all_p3_done = cl_assets and all(a.get("phase3_complete") for a in cl_assets)
-        _news_done = checklist.get("news", {}).get("checked", False)
-        _all_phases_done = _all_p2_done and _all_p3_done and _news_done
-
-        # Check if all pre-trade phases are complete
-        _all_p2_done = cl_assets and all(a.get("phase2_complete") for a in cl_assets)
-        _all_p3_done = cl_assets and all(a.get("phase3_complete") for a in cl_assets)
-        _news_done = checklist.get("news", {}).get("checked", False)
-        _all_phases_done = _all_p2_done and _all_p3_done and _news_done
-
-        # If all done → collapsed summary with toggle to expand
-        if _all_phases_done:
-            _p2_summary_parts = []
-            for _sa in cl_assets:
-                _sa_lbl = _sa.get("phase2", {}).get("context_label", "?")
-                _p2_summary_parts.append(f"{_sa['name']}: {_sa_lbl}")
-            _p2_summary = " · ".join(_p2_summary_parts)
-            st.caption(f"Daily analysis complete: {_p2_summary}")
-            _render_phases = st.checkbox("Show / edit daily analysis", value=False, key="show_phases_toggle")
-        else:
-            _render_phases = True
-
-        if not _render_phases:
-            # Still show news banner even when phases collapsed (but greyed out if expired)
-            _news_data = checklist.get("news", {})
-            if _news_data.get("has_news"):
-                _nev_impact = _news_data.get("event_impact", "HIGH")
-                _nev_et = _news_data.get("event_time", "?")
-                _nev_local = _et_to_local(_nev_et, prefs.get("user_tz_offset", 1))
-                _nev_status = _news_window_status(_nev_local)
-                if _nev_status == "expired":
-                    st.markdown(
-                        f'<div style="background:#0e1220;border:1px solid #1e2a45;border-radius:12px;'
-                        f'padding:12px;text-align:center;margin:8px 0;opacity:0.5">'
-                        f'<span style="font-size:0.8rem;color:#4b5a7a;text-decoration:line-through">'
-                        f'{_news_data.get("event_name","?")} at {_nev_local} local — event passed</span>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    try:
-                        _lp = _nev_local.split(":")
-                        _lh, _lm = int(_lp[0]), int(_lp[1])
-                        _from_m = _lh * 60 + _lm - 30
-                        _to_m = _lh * 60 + _lm + 30
-                        _from_str = f"{(_from_m // 60) % 24:02d}:{_from_m % 60:02d}"
-                        _to_str = f"{(_to_m // 60) % 24:02d}:{_to_m % 60:02d}"
-                        _window = f"{_from_str} — {_to_str} local"
-                    except Exception:
-                        _window = f"30 min around {_nev_local}"
-                    if _nev_impact in ("EXTREME", "HIGH"):
-                        st.markdown(
-                            f'<div style="background:#1a0000;border:2px solid #ef4444;border-radius:12px;'
-                            f'padding:28px;text-align:center;margin:16px 0">'
-                            f'<div style="font-size:2rem;font-weight:900;color:#ef4444;letter-spacing:0.06em;line-height:1">'
-                            f'DO NOT TRADE</div>'
-                            f'<div style="font-size:1.1rem;color:#e2e8f0;margin-top:12px;font-weight:600">'
-                            f'{_window}</div>'
-                            f'<div style="font-size:0.85rem;color:#94a3b8;margin-top:8px">'
-                            f'{_news_data.get("event_name","?")} ({_nev_impact} impact) · {_nev_local} local / {_nev_et} ET</div>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-
-        if _render_phases:
-         # ── Phase 2 — Market Context ──
-         st.markdown("""
-         <div class="sec-hdr">
-           <div class="sec-line"></div>
-           <div class="sec-title">Phase 2</div>
-           <div class="sec-line"></div>
-         </div>
-         <div style="text-align:center;font-size:0.7rem;color:#4b5a7a;text-transform:uppercase;letter-spacing:.1em;font-weight:600;margin:-12px 0 16px">Market Context</div>""", unsafe_allow_html=True)
-         _all_instruments = ["SOL", "BTC", "MNQ", "MES", "ETH", "SUI"]
-         _DEFAULT_ASSETS = ["SOL", "BTC", "MNQ", "MES"]
-         _used_names = [a["name"] for a in cl_assets]
-
-         # Auto-populate defaults on first use
-         if not cl_assets:
-             for _da in _DEFAULT_ASSETS:
-                 cl_assets.append({**_ASSET_DEFAULTS, "name": _da})
-             checklist["assets"] = cl_assets
-             session["checklist"] = checklist
-             _save_session(session)
-             st.rerun()
-
-         # ── Per-asset TABS with "+" tab ──
-         def _tab_label(a):
-             _done = a.get("phase2_complete") and a.get("phase3_complete")
-             _ctx = a.get("phase2", {}).get("context_label", "") if a.get("phase2_complete") else ""
-             # Shorten context for tab: "MEAN REVERTING LONG" → "MR LONG"
-             _short = _ctx.replace("MEAN REVERTING", "MR").replace("BREAKOUT EXPECTED", "BO").replace("CAUTION — INSIDE DAY", "ID")
-             if _done and _short:
-                 return f"✓ {a['name']} · {_short}"
-             elif _short:
-                 return f"{a['name']} · {_short}"
-             return a["name"]
-         _tab_labels = [_tab_label(a) for a in cl_assets] + ["+"]
-         _asset_tabs = st.tabs(_tab_labels)
-
-         # ── "+" tab — add new asset ──
-         with _asset_tabs[-1]:
-             _avail = [x for x in _all_instruments if x not in _used_names]
-             _options = _avail + (["Custom..."] if True else [])
-             if _options:
-                 _sel = st.selectbox("Select asset to add", _options, key="new_asset_sel", label_visibility="collapsed")
-                 if _sel == "Custom...":
-                     _custom_name = st.text_input("Enter asset name", key="custom_asset_name", placeholder="e.g. DOGE, XRP, ES")
-                     _final_name = _custom_name.strip().upper() if _custom_name else ""
-                     if _final_name and _final_name in _used_names:
-                         st.warning(f"{_final_name} already added.")
-                         _final_name = ""
-                 else:
-                     _final_name = _sel
-                 if _final_name and st.button(f"Add {_final_name}", key="add_asset_btn", width="stretch"):
-                     cl_assets.append({**_ASSET_DEFAULTS, "name": _final_name})
-                     checklist["assets"] = cl_assets
-                     session["checklist"] = checklist
-                     _save_session(session)
-                     st.rerun()
-                 if not _avail:
-                     st.caption("All preset assets added. Use Custom to add more.")
-             else:
-                 st.caption("All preset assets added. Use Custom to add more.")
-
-         # ── Asset content tabs ──
-         for _ai, _asset in enumerate(cl_assets):
-           with _asset_tabs[_ai]:
-             _aname  = _asset["name"]
-             _a_p2c  = _asset.get("phase2_complete", False)
-             _a_p3c  = _asset.get("phase3_complete", False)
-             _a_ready = _a_p2c and _a_p3c
-
-             # Centered: ◀ Remove ▶ with confirm
-             _rm_key = f"rm_pending_{_ai}"
-             if st.session_state.get(_rm_key):
-                 _cpad_l, _cf_y, _cf_n, _cpad_r = st.columns([2, 0.8, 0.8, 2])
-                 with _cf_y:
-                     if st.button("Confirm", key=f"rm_yes_{_ai}", type="primary", width="stretch"):
-                         st.session_state[_rm_key] = False
-                         cl_assets.pop(_ai)
-                         checklist["assets"] = cl_assets
-                         session["checklist"] = checklist
-                         _save_session(session)
-                         st.rerun()
-                 with _cf_n:
-                     if st.button("Cancel", key=f"rm_no_{_ai}", type="secondary", width="stretch"):
-                         st.session_state[_rm_key] = False
-                         st.rerun()
-             else:
-                 _pad_l, _ml, _rm, _mr, _pad_r = st.columns([2, 0.4, 0.8, 0.4, 2])
-                 with _ml:
-                     if _ai > 0 and st.button("◀", key=f"mvl_{_ai}", width="stretch"):
-                         cl_assets[_ai], cl_assets[_ai - 1] = cl_assets[_ai - 1], cl_assets[_ai]
-                         checklist["assets"] = cl_assets
-                         session["checklist"] = checklist
-                         _save_session(session)
-                         st.rerun()
-                 with _rm:
-                     if st.button("✕ Remove", key=f"rm_{_ai}", type="secondary", width="stretch"):
-                         st.session_state[_rm_key] = True
-                         st.rerun()
-                 with _mr:
-                     if _ai < len(cl_assets) - 1 and st.button("▶", key=f"mvr_{_ai}", width="stretch"):
-                         cl_assets[_ai], cl_assets[_ai + 1] = cl_assets[_ai + 1], cl_assets[_ai]
-                         checklist["assets"] = cl_assets
-                         session["checklist"] = checklist
-                         _save_session(session)
-                         st.rerun()
-
-             # ── Phase 2 — Market Context (pbD 5-step derivation) ──
-             if not _a_p2c:
-                 # Step 1 — Day Type (clickable image cards OUTSIDE form)
-                 st.markdown(
-                     '<div class="decision-hdg">Step 1 — Previous Day\'s TPO Profile Type</div>',
-                     unsafe_allow_html=True,
-                 )
-                 _DAY_TYPE_IMAGES = {
-                     "Normal Day": os.path.join(_APP_DIR, "assets", "day_normal.png"),
-                     "Normal Day Variation (Long)": os.path.join(_APP_DIR, "assets", "day_ndv long.png"),
-                     "Normal Day Variation (Short)": os.path.join(_APP_DIR, "assets", "day_ndv short.png"),
-                     "Inside Day": os.path.join(_APP_DIR, "assets", "day_inside.png"),
-                     "Trend Day (P-profile)": os.path.join(_APP_DIR, "assets", "day_trend_p.png"),
-                     "Trend Day (b-profile)": os.path.join(_APP_DIR, "assets", "day_trend_b.png"),
-                     "Double Distribution": os.path.join(_APP_DIR, "assets", "day_double_dist.png"),
-                 }
-                 _DAY_TYPE_SHORT_LABELS = {
-                     "Normal Day": "Normal Day",
-                     "Normal Day Variation (Long)": "Normal Variation Long",
-                     "Normal Day Variation (Short)": "Normal Variation Short",
-                     "Inside Day": "Inside Day",
-                     "Trend Day (P-profile)": "Trend P",
-                     "Trend Day (b-profile)": "Trend b",
-                     "Double Distribution": "Double Dist.",
-                 }
-                 _dt_key = f"p2s_{_ai}"
-                 _current_dt = st.session_state.get(_dt_key, _MARKET_STATES[0])
-
-                 # Row 1: Normal Day, NDV Long, NDV Short, Inside Day (4 cols)
-                 _dt_r1 = st.columns(4)
-                 _r1_types = ["Normal Day", "Normal Day Variation (Long)", "Normal Day Variation (Short)", "Inside Day"]
-                 for _dti, _dt_name in enumerate(_r1_types):
-                     with _dt_r1[_dti]:
-                         _dt_img = _DAY_TYPE_IMAGES.get(_dt_name)
-                         if _dt_img and os.path.exists(_dt_img):
-                             st.image(_dt_img, width="stretch")
-                         _is_sel = _current_dt == _dt_name
-                         _btn_type = "primary" if _is_sel else "secondary"
-                         if st.button(
-                             _DAY_TYPE_SHORT_LABELS.get(_dt_name, _dt_name),
-                             key=f"dt_{_ai}_{_dti}", type=_btn_type, width="stretch",
-                         ):
-                             st.session_state[_dt_key] = _dt_name
-                             st.rerun()
-
-                 # Row 2: Trend P, Trend b, Double Distribution, empty (4 cols to match row 1)
-                 _dt_r2 = st.columns(4)
-                 _r2_types = ["Trend Day (P-profile)", "Trend Day (b-profile)", "Double Distribution"]
-                 for _dti2, _dt_name2 in enumerate(_r2_types):
-                     with _dt_r2[_dti2]:
-                         _dt_img2 = _DAY_TYPE_IMAGES.get(_dt_name2)
-                         if _dt_img2 and os.path.exists(_dt_img2):
-                             st.image(_dt_img2, width="stretch")
-                         _is_sel2 = _current_dt == _dt_name2
-                         _btn_type2 = "primary" if _is_sel2 else "secondary"
-                         if st.button(
-                             _DAY_TYPE_SHORT_LABELS.get(_dt_name2, _dt_name2),
-                             key=f"dt_{_ai}_{_dti2 + 4}", type=_btn_type2, width="stretch",
-                         ):
-                             st.session_state[_dt_key] = _dt_name2
-                             st.rerun()
-
-                 st.markdown('<hr style="border-color:#1a2238;margin:16px 0">', unsafe_allow_html=True)
-
-                 # Steps 2-5 (outside form so session state updates live)
-
-                 # Step 2 & 3 — Open & Close Location
-                 st.markdown(
-                     '<div class="decision-hdg">Step 2 & 3 — Previous Day Open & Close</div>',
-                     unsafe_allow_html=True,
-                 )
-                 _oc1, _oc2 = st.columns(2)
-                 with _oc1:
-                     _p2_open = st.radio("Yesterday price OPEN", _VA_LOCATIONS, key=f"p2o_{_ai}", index=1)
-                 with _oc2:
-                     _p2_close = st.radio("Yesterday price CLOSE", _VA_LOCATIONS, key=f"p2c_{_ai}", index=1)
-
-                 st.markdown('<hr style="border-color:#1a2238;margin:16px 0">', unsafe_allow_html=True)
-
-                 # Step 4 — Tails
-                 st.markdown(
-                     '<div class="decision-hdg">Step 4 — Tail Quality</div>',
-                     unsafe_allow_html=True,
-                 )
-                 _p2_tail = st.radio(
-                     "Previous day buying/selling tails?", _TAIL_OPTIONS,
-                     key=f"p2t_{_ai}", horizontal=True,
-                 )
-
-                 st.markdown('<hr style="border-color:#1a2238;margin:16px 0">', unsafe_allow_html=True)
-
-                 # Step 5 — Initial Balance
-                 st.markdown(
-                     '<div class="decision-hdg">Step 5 — Initial Balance (first 30 min)</div>',
-                     unsafe_allow_html=True,
-                 )
-                 _p2_ib = st.radio(
-                     "Today's IB size", _IB_OPTIONS, key=f"p2ib_{_ai}", horizontal=True,
-                 )
-
-                 st.markdown('<hr style="border-color:#1a2238;margin:16px 0">', unsafe_allow_html=True)
-
-                 # ── Live derived context preview ──
-                 _ctx_label, _ctx_conf, _ctx_dir, _ctx_struct = _derive_context(
-                     st.session_state.get(f"p2s_{_ai}", _MARKET_STATES[0]),
-                     _p2_open,
-                     _p2_close,
-                     _p2_tail,
-                     _p2_ib,
-                 )
-                 _ctx_col = _context_color(_ctx_label)
-                 st.markdown(
-                     f'<div style="background:#0a0e18;border:2px solid {_ctx_col};border-radius:12px;'
-                     f'padding:24px;text-align:center;margin:8px 0">'
-                     f'<div style="font-size:0.6rem;color:#4b5a7a;text-transform:uppercase;'
-                     f'letter-spacing:.12em;font-weight:600;margin-bottom:8px">Derived Context</div>'
-                     f'<div style="font-size:2rem;font-weight:900;color:{_ctx_col};'
-                     f'letter-spacing:0.04em;line-height:1.1">{_ctx_label}</div>'
-                     f'<div style="font-size:0.85rem;color:#94a3b8;margin-top:8px">'
-                     f'Confidence: <strong style="color:{_ctx_col}">{_ctx_conf}%</strong></div>'
-                     f'</div>',
-                     unsafe_allow_html=True,
-                 )
-
-                 # Confirm button
-                 _cf_pad1, _cf_btn, _cf_pad2 = st.columns([1, 2, 1])
-                 with _cf_btn:
-                     if st.button(f"Confirm Market Context for {_aname} →", key=f"p2_confirm_{_ai}", width="stretch"):
-                         cl_assets[_ai]["phase2"] = {
-                             "day_type":       st.session_state.get(f"p2s_{_ai}", _MARKET_STATES[0]),
-                             "open_location":  _p2_open,
-                             "close_location": _p2_close,
-                             "tail":           _p2_tail,
-                             "ib_size":        _p2_ib,
-                             "context_label":  _ctx_label,
-                             "confidence":     _ctx_conf,
-                             "direction_score": _ctx_dir,
-                             "structure":      _ctx_struct,
-                         }
-                         cl_assets[_ai]["phase2_complete"] = True
-                         checklist["assets"] = cl_assets
-                         session["checklist"] = checklist
-                         _save_session(session)
-                         _log_context(_aname, cl_assets[_ai]["phase2"])
-                         st.rerun()
-             else:
-                 # ── Phase 2 Complete — show summary ──
-                 _p2d = _asset.get("phase2", {})
-                 _ctx_lbl = _p2d.get("context_label", "?")
-                 _ctx_cnf = _p2d.get("confidence", 0)
-                 _ctx_c = _context_color(_ctx_lbl)
-                 st.markdown(
-                     f'<div style="background:#0a0e18;border:2px solid {_ctx_c};border-radius:12px;'
-                     f'padding:20px;text-align:center;margin:8px 0">'
-                     f'<div style="font-size:0.6rem;color:#4b5a7a;text-transform:uppercase;'
-                     f'letter-spacing:.12em;font-weight:600;margin-bottom:6px">Today\'s Context · {_aname}</div>'
-                     f'<div style="font-size:2rem;font-weight:900;color:{_ctx_c};'
-                     f'letter-spacing:0.04em;line-height:1.1">{_ctx_lbl}</div>'
-                     f'<div style="font-size:0.85rem;color:#94a3b8;margin-top:8px">'
-                     f'Confidence: <strong style="color:{_ctx_c}">{_ctx_cnf}%</strong></div>'
-                     f'<div style="font-size:0.7rem;color:#4b5a7a;margin-top:10px">'
-                     f'{_p2d.get("day_type","?")} · Open: {_p2d.get("open_location","?")} · '
-                     f'Close: {_p2d.get("close_location","?")} · {_p2d.get("tail","?")} · '
-                     f'{_p2d.get("ib_size","?")}</div>'
-                     f'</div>',
-                     unsafe_allow_html=True,
-                 )
-                 _rd_pad, _rd_btn, _rd_pad2 = st.columns([2, 1, 2])
-                 with _rd_btn:
-                     if st.button(f"↩ Redo", key=f"rdop2_{_ai}", type="secondary", width="stretch"):
-                         cl_assets[_ai]["phase2"] = {}
-                         cl_assets[_ai]["phase2_complete"] = False
-                         cl_assets[_ai]["phase3_complete"] = False
-                         checklist["assets"] = cl_assets
-                         session["checklist"] = checklist
-                         _save_session(session)
-                         st.rerun()
-
-             # ── Trade Setup (Opening Variant) ──
-             if _a_p2c:
-                 _VARIANT_IMAGES = {
-                     "Variant 1": os.path.join(_APP_DIR, "assets", "variant_1_within_va.png"),
-                     "Variant 2": os.path.join(_APP_DIR, "assets", "variant_2_va_absolute.png"),
-                     "Variant 3": os.path.join(_APP_DIR, "assets", "variant_3_outside_stays.png"),
-                     "Variant 4": os.path.join(_APP_DIR, "assets", "variant_4_outside_returns.png"),
-                 }
-                 _VARIANT_INFO = {
-                     "Variant 1": {
-                         "title": "Open Within VA",
-                         "desc": "Price opens within yesterday's VA. Once it moves to VAH or VAL and stays 30min → full VA traverse likely.",
-                         "entry": "At VAH or VAL (whichever price reaches first)",
-                         "tp": "Opposite VAH/VAL",
-                         "sl": "Beyond absolute high/low of the day",
-                     },
-                     "Variant 2": {
-                         "title": "Open Between VA-abs and VAH/VAL",
-                         "desc": "Price opened outside VA but within absolute range. Likely heading to vPOC. Trade the bounce back.",
-                         "entry": "At vPOC after bounce confirmation",
-                         "tp": "Back to today's opening price",
-                         "sl": "Beyond vPOC",
-                     },
-                     "Variant 3": {
-                         "title": "Open Outside VA-abs (Stays Out)",
-                         "desc": "Strong gap/imbalance. Price stays outside — expect acceleration away from previous VA.",
-                         "entry": "On retests of structure breaks",
-                         "tp": "Big-picture levels, naked POCs, prior VAs",
-                         "sl": "Between VA-absolute and VAH/VAL",
-                     },
-                     "Variant 4": {
-                         "title": "Open Outside VA-abs → Returns Into VA (80% Rule)",
-                         "desc": "Price opened outside but returned into VA and stayed 30min. 80% probability of full VA traverse.",
-                         "entry": "At VAH or VAL (NOT at VA-absolute)",
-                         "tp": "Opposite VAH/VAL (full traverse)",
-                         "sl": "Between VAH/VAL and absolute high/low",
-                     },
-                 }
-                 _vs_key = f"variant_{_ai}"
-                 _current_variant = st.session_state.get(_vs_key, None)
-
-                 st.markdown(
-                     f'<div class="sec-hdr" style="margin:20px 0 6px">'
-                     f'<div class="sec-line"></div>'
-                     f'<div class="sec-title">Trade Setup</div>'
-                     f'<div class="sec-line"></div>'
-                     f'</div>'
-                     f'<div style="text-align:center;font-size:0.7rem;color:#4b5a7a;text-transform:uppercase;'
-                     f'letter-spacing:.1em;font-weight:600;margin:0 0 12px">Opening Variant · {_aname}</div>',
-                     unsafe_allow_html=True,
-                 )
-
-                 # 4 variant cards in a row
-                 _v_cols = st.columns(4)
-                 for _vi, (_vk, _vinfo) in enumerate(_VARIANT_INFO.items()):
-                     with _v_cols[_vi]:
-                         _v_img = _VARIANT_IMAGES.get(_vk)
-                         if _v_img and os.path.exists(_v_img):
-                             st.image(_v_img, width="stretch")
-                         _v_sel = _current_variant == _vk
-                         _v_btn_type = "primary" if _v_sel else "secondary"
-                         if st.button(
-                             _vinfo["title"].split("(")[0].strip(),
-                             key=f"var_{_ai}_{_vi}", type=_v_btn_type, width="stretch",
-                         ):
-                             st.session_state[_vs_key] = _vk
-                             st.rerun()
-
-                 # Show selected variant details
-                 if _current_variant and _current_variant in _VARIANT_INFO:
-                     _sv = _VARIANT_INFO[_current_variant]
-                     st.markdown(
-                         f'<div style="background:#0a0e18;border:1px solid #1e2a45;border-radius:10px;'
-                         f'padding:16px 20px;margin:10px 0;text-align:center">'
-                         f'<div style="font-size:0.95rem;font-weight:700;color:#e2e8f0;margin-bottom:8px">'
-                         f'{_sv["title"]}</div>'
-                         f'<div style="font-size:0.8rem;color:#94a3b8;margin-bottom:12px">{_sv["desc"]}</div>'
-                         f'<div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">'
-                         f'<div style="text-align:center">'
-                         f'<div style="font-size:0.6rem;color:#22c55e;text-transform:uppercase;letter-spacing:.08em;font-weight:600">Entry</div>'
-                         f'<div style="font-size:0.75rem;color:#e2e8f0">{_sv["entry"]}</div></div>'
-                         f'<div style="text-align:center">'
-                         f'<div style="font-size:0.6rem;color:#3b82f6;text-transform:uppercase;letter-spacing:.08em;font-weight:600">Take Profit</div>'
-                         f'<div style="font-size:0.75rem;color:#e2e8f0">{_sv["tp"]}</div></div>'
-                         f'<div style="text-align:center">'
-                         f'<div style="font-size:0.6rem;color:#ef4444;text-transform:uppercase;letter-spacing:.08em;font-weight:600">Stop Loss</div>'
-                         f'<div style="font-size:0.75rem;color:#e2e8f0">{_sv["sl"]}</div></div>'
-                         f'</div></div>',
-                         unsafe_allow_html=True,
-                     )
-
-             # ── P-Setup / b-Setup Entry Logic (when day type is trending) ──
-             if _a_p2c:
-                 _p2_dt = _asset.get("phase2", {}).get("day_type", "")
-                 _p2_struct = _asset.get("phase2", {}).get("structure", "MR")
-                 if _p2_dt in ("Trend Day (P-profile)", "Trend Day (b-profile)") or _p2_struct == "TR":
-                     _is_p = _p2_dt == "Trend Day (P-profile)" or (_p2_struct == "TR" and _asset.get("phase2", {}).get("direction_score", 0) > 0)
-                     _setup_name = "P-Setup (Long)" if _is_p else "b-Setup (Short)"
-                     _setup_dir = "long" if _is_p else "short"
-                     _sk = f"pbs_{_ai}"
-
-                     st.markdown(
-                         f'<div class="sec-hdr" style="margin:20px 0 6px">'
-                         f'<div class="sec-line"></div>'
-                         f'<div class="sec-title">{_setup_name}</div>'
-                         f'<div class="sec-line"></div>'
-                         f'</div>'
-                         f'<div style="text-align:center;font-size:0.7rem;color:#4b5a7a;text-transform:uppercase;'
-                         f'letter-spacing:.1em;font-weight:600;margin:0 0 12px">3-Stage Entry · {_aname}</div>',
-                         unsafe_allow_html=True,
-                     )
-
-                     _stages = [
-                         ("Pullback", "Price retraces to key level (vPOC, VA edge, or prior structure)"),
-                         ("Break-In", "30M candle closes back into value / structure — acceptance confirmed"),
-                         ("Break-Out", "Price breaks beyond structure in trend direction — enter on retest"),
-                     ]
-                     _stage_val = st.session_state.get(_sk, 0)
-                     _stage_html = '<div style="display:flex;gap:8px;margin:8px 0 12px">'
-                     for _si, (_sname, _sdesc) in enumerate(_stages):
-                         _scls = "done" if _si < _stage_val else ("active" if _si == _stage_val else "")
-                         _scolor = "#22c55e" if _si < _stage_val else ("#f97316" if _si == _stage_val else "#4b5a7a")
-                         _sicon = "✓" if _si < _stage_val else f"{_si + 1}"
-                         _stage_html += (
-                             f'<div class="setup-stage {_scls}">'
-                             f'<div class="setup-stage-val" style="color:{_scolor}">{_sicon} {_sname}</div>'
-                             f'<div class="setup-stage-lbl">{_sdesc}</div>'
-                             f'</div>'
-                         )
-                     _stage_html += '</div>'
-                     st.markdown(_stage_html, unsafe_allow_html=True)
-
-                     _pb_cols = st.columns(3)
-                     with _pb_cols[0]:
-                         if _stage_val == 0:
-                             if st.button("Pullback Confirmed", key=f"pbs1_{_ai}", width="stretch", type="primary"):
-                                 st.session_state[_sk] = 1
-                                 st.rerun()
-                         else:
-                             st.button("✓ Pullback", key=f"pbs1d_{_ai}", width="stretch", disabled=True)
-                     with _pb_cols[1]:
-                         if _stage_val == 1:
-                             if st.button("Break-In Confirmed", key=f"pbs2_{_ai}", width="stretch", type="primary"):
-                                 st.session_state[_sk] = 2
-                                 st.rerun()
-                         elif _stage_val > 1:
-                             st.button("✓ Break-In", key=f"pbs2d_{_ai}", width="stretch", disabled=True)
-                         else:
-                             st.button("Break-In", key=f"pbs2w_{_ai}", width="stretch", disabled=True)
-                     with _pb_cols[2]:
-                         if _stage_val == 2:
-                             if st.button("Break-Out — ENTER", key=f"pbs3_{_ai}", width="stretch", type="primary"):
-                                 st.session_state[_sk] = 3
-                                 st.rerun()
-                         elif _stage_val > 2:
-                             st.button("✓ Entry Confirmed", key=f"pbs3d_{_ai}", width="stretch", disabled=True)
-                         else:
-                             st.button("Break-Out", key=f"pbs3w_{_ai}", width="stretch", disabled=True)
-
-                     if _stage_val >= 3:
-                         _entry_msg = "LONG entry on retest — trade WITH the trend" if _is_p else "SHORT entry on retest — trade WITH the trend"
-                         st.markdown(
-                             f'<div style="background:#0a1a0a;border:2px solid #22c55e;border-radius:10px;'
-                             f'padding:14px;text-align:center;margin:8px 0">'
-                             f'<div style="font-size:0.9rem;font-weight:800;color:#22c55e;letter-spacing:0.04em">'
-                             f'{_entry_msg}</div></div>',
-                             unsafe_allow_html=True,
-                         )
-                     if _stage_val > 0:
-                         if st.button("Reset Stages", key=f"pbs_reset_{_ai}", type="secondary"):
-                             st.session_state[_sk] = 0
-                             st.rerun()
-
-             # ── Breakout Models (when structure is trending or ID) ──
-             if _a_p2c:
-                 _p2_struct2 = _asset.get("phase2", {}).get("structure", "MR")
-                 if _p2_struct2 in ("TR", "ID"):
-                     st.markdown(
-                         f'<div class="sec-hdr" style="margin:20px 0 6px">'
-                         f'<div class="sec-line"></div>'
-                         f'<div class="sec-title">Breakout Model</div>'
-                         f'<div class="sec-line"></div>'
-                         f'</div>'
-                         f'<div style="text-align:center;font-size:0.7rem;color:#4b5a7a;text-transform:uppercase;'
-                         f'letter-spacing:.1em;font-weight:600;margin:0 0 12px">Opening Type · {_aname}</div>',
-                         unsafe_allow_html=True,
-                     )
-                     _BREAKOUT_MODELS = {
-                         "Open Drive": {
-                             "desc": "Price opens and drives immediately in one direction with conviction. No test of open price.",
-                             "action": "Enter immediately on first pullback to microstructure. Aggressive — small SL.",
-                             "confidence": "Highest conviction — strong institutional flow.",
-                             "color": "#22c55e",
-                         },
-                         "Open Test Drive": {
-                             "desc": "Price opens, tests a nearby level (IB edge, prior VA), then drives directionally.",
-                             "action": "Wait for the test, confirm rejection, then enter in drive direction.",
-                             "confidence": "High — the test confirms the level holds.",
-                             "color": "#3b82f6",
-                         },
-                         "Open Rejection Reverse": {
-                             "desc": "Price opens in one direction, gets rejected at key level, reverses with conviction.",
-                             "action": "Enter the reversal after 30M close confirms new direction. Fade the initial move.",
-                             "confidence": "Medium — need clear rejection signal (footprint, volume).",
-                             "color": "#f59e0b",
-                         },
-                         "Open Auction": {
-                             "desc": "Price opens and auctions in both directions. No immediate conviction. Rotational.",
-                             "action": "Wait for IB to form. Trade the break of IB range. Do NOT enter early.",
-                             "confidence": "Lower — wait for IB breakout confirmation.",
-                             "color": "#94a3b8",
-                         },
-                     }
-                     _bm_key = f"bm_{_ai}"
-                     _current_bm = st.session_state.get(_bm_key, None)
-
-                     _bm_cols = st.columns(4)
-                     for _bmi, (_bmk, _bmv) in enumerate(_BREAKOUT_MODELS.items()):
-                         with _bm_cols[_bmi]:
-                             _bm_sel = _current_bm == _bmk
-                             _bm_type = "primary" if _bm_sel else "secondary"
-                             if st.button(_bmk, key=f"bm_{_ai}_{_bmi}", type=_bm_type, width="stretch"):
-                                 st.session_state[_bm_key] = _bmk
-                                 st.rerun()
-
-                     if _current_bm and _current_bm in _BREAKOUT_MODELS:
-                         _bmd = _BREAKOUT_MODELS[_current_bm]
-                         st.markdown(
-                             f'<div style="background:#0a0e18;border:1px solid {_bmd["color"]};border-radius:10px;'
-                             f'padding:16px 20px;margin:10px 0;text-align:center">'
-                             f'<div style="font-size:0.95rem;font-weight:700;color:#e2e8f0;margin-bottom:8px">{_current_bm}</div>'
-                             f'<div style="font-size:0.8rem;color:#94a3b8;margin-bottom:12px">{_bmd["desc"]}</div>'
-                             f'<div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">'
-                             f'<div style="text-align:center">'
-                             f'<div style="font-size:0.6rem;color:{_bmd["color"]};text-transform:uppercase;letter-spacing:.08em;font-weight:600">Action</div>'
-                             f'<div style="font-size:0.75rem;color:#e2e8f0">{_bmd["action"]}</div></div>'
-                             f'<div style="text-align:center">'
-                             f'<div style="font-size:0.6rem;color:{_bmd["color"]};text-transform:uppercase;letter-spacing:.08em;font-weight:600">Confidence</div>'
-                             f'<div style="font-size:0.75rem;color:#e2e8f0">{_bmd["confidence"]}</div></div>'
-                             f'</div></div>',
-                             unsafe_allow_html=True,
-                         )
-
-             # ── Phase 3 ──
-             if _a_p2c:
-                 st.markdown(
-                     f'<div class="sec-hdr" style="margin:20px 0 6px">'
-                     f'<div class="sec-line"></div>'
-                     f'<div class="sec-title">Phase 3</div>'
-                     f'<div class="sec-line"></div>'
-                     f'</div>'
-                     f'<div style="text-align:center;font-size:0.7rem;color:#4b5a7a;text-transform:uppercase;'
-                     f'letter-spacing:.1em;font-weight:600;margin:0 0 12px">Key Levels · {_aname}</div>',
-                     unsafe_allow_html=True,
-                 )
-                 if not _a_p3c:
-                     with st.form(f"p3_{_ai}"):
-                         st.checkbox(f"Key Support / Resistance levels marked for {_aname}", key=f"p3sr_{_ai}")
-                         st.checkbox(f"Trend lines drawn for {_aname}", key=f"p3tl_{_ai}")
-                         st.checkbox(f"Price alerts set for {_aname}", key=f"p3al_{_ai}")
-
-                         if st.form_submit_button(f"Confirm Phase 3 for {_aname} →", width="stretch"):
-                             if not (st.session_state.get(f"p3sr_{_ai}") and
-                                     st.session_state.get(f"p3tl_{_ai}") and
-                                     st.session_state.get(f"p3al_{_ai}")):
-                                 st.error("Check all three items to proceed.")
-                             else:
-                                 cl_assets[_ai]["phase3"] = {"sr_levels": True, "trend_lines": True, "price_alerts": True}
-                                 cl_assets[_ai]["phase3_complete"] = True
-                                 checklist["assets"] = cl_assets
-                                 session["checklist"] = checklist
-                                 _save_session(session)
-                                 st.rerun()
-                 else:
-                     st.markdown(
-                         f'<div class="checklist-badge-done" style="display:inline-block;margin-bottom:6px">'
-                         f'✓ Phase 3 — {_aname}</div><br>'
-                         f'<span style="font-size:0.75rem;color:#94a3b8">✓ Support / Resistance · ✓ Trend lines · ✓ Price alerts</span>',
-                         unsafe_allow_html=True,
-                     )
-                     if st.button(f"↩ Redo Phase 3 — {_aname}", key=f"rdop3_{_ai}", type="secondary"):
-                         cl_assets[_ai]["phase3_complete"] = False
-                         checklist["assets"] = cl_assets
-                         session["checklist"] = checklist
-                         _save_session(session)
-                         st.rerun()
-
-         # ── News Events Gate (shared — after all Phase 3s, before trading) ──
-         _NEWS_EVENTS = [
-             ("FOMC Rate Decision", "EXTREME"),
-             ("NFP (Non-Farm Payrolls)", "EXTREME"),
-             ("CPI / Core CPI", "EXTREME"),
-             ("PPI", "EXTREME"),
-             ("PCE (Core)", "EXTREME"),
-             ("Fed Chair Speaks", "EXTREME"),
-             ("FOMC Minutes", "HIGH"),
-             ("ECB / BOJ Decision", "HIGH"),
-             ("GDP (Advance)", "MEDIUM"),
-             ("Jobless Claims", "MEDIUM"),
-             ("Other", "MEDIUM"),
-         ]
-         _news_data = checklist.get("news", {})
-         if cl_any_ready and not _news_data.get("checked"):
-             st.markdown("""
-             <div class="sec-hdr" style="margin:24px 0 6px">
-               <div class="sec-line"></div>
-               <div class="sec-title">News Check</div>
-               <div class="sec-line"></div>
-             </div>
-             <div style="text-align:center;font-size:0.7rem;color:#4b5a7a;text-transform:uppercase;letter-spacing:.1em;font-weight:600;margin:0 0 12px">Before you trade — check for high-impact events</div>""",
-                 unsafe_allow_html=True,
-             )
-             _nyn_pad1, _nyn_c, _nyn_pad2 = st.columns([1, 2, 1])
-             with _nyn_c:
-                 _news_yn = st.radio("High-impact news event today?", ["No", "Yes"], key="news_yn_gate", horizontal=True)
-             if _news_yn == "Yes":
-                 _nev_pad1, _nev_c, _nev_pad2 = st.columns([1, 2, 1])
-                 with _nev_c:
-                     _ev_names = [f"{n} ({lvl})" for n, lvl in _NEWS_EVENTS]
-                     _sel_event = st.selectbox("Select event", _ev_names, key="news_event_sel")
-                     _ev_time = st.text_input("Event time (ET / New York)", placeholder="e.g. 08:30, 14:00", key="news_event_time")
-                     if _ev_time:
-                         _local_preview = _et_to_local(_ev_time, prefs.get("user_tz_offset", 1))
-                         st.caption(f"Your local time: **{_local_preview}** (UTC+{prefs.get('user_tz_offset', 1)})")
-                 _ev_base_name = _sel_event.split(" (")[0] if _sel_event else ""
-                 _ev_impact = next((lvl for n, lvl in _NEWS_EVENTS if n == _ev_base_name), "MEDIUM")
-             _npad1, _nbtn, _npad2 = st.columns([1, 2, 1])
-             with _nbtn:
-                 if st.button("Confirm News Check →", key="news_confirm", width="stretch"):
-                     _hn = _news_yn == "Yes"
-                     checklist["news"] = {
-                         "checked":    True,
-                         "has_news":   _hn,
-                         "event_name": _ev_base_name if _hn else "",
-                         "event_time": _ev_time if _hn else "",
-                         "event_impact": _ev_impact if _hn else "",
-                     }
-                     session["checklist"] = checklist
-                     _save_session(session)
-                     st.rerun()
-
-         # ── News event warning banner (persistent, status-aware) ──
-         if _news_data.get("has_news"):
-             _nev_impact = _news_data.get("event_impact", "HIGH")
-             _nev_et = _news_data.get("event_time", "?")
-             _nev_local = _et_to_local(_nev_et, prefs.get("user_tz_offset", 1))
-             _nev_status = _news_window_status(_nev_local)
-             try:
-                 _lp = _nev_local.split(":")
-                 _lh, _lm = int(_lp[0]), int(_lp[1])
-                 _from_m = _lh * 60 + _lm - 30
-                 _to_m = _lh * 60 + _lm + 30
-                 _from_str = f"{(_from_m // 60) % 24:02d}:{_from_m % 60:02d}"
-                 _to_str = f"{(_to_m // 60) % 24:02d}:{_to_m % 60:02d}"
-                 _window = f"{_from_str} — {_to_str} local"
-             except Exception:
-                 _window = f"30 min around {_nev_local}"
-             if _nev_status == "expired":
-                 # Event passed — greyed out
-                 st.markdown(
-                     f'<div style="background:#0e1220;border:1px solid #1e2a45;border-radius:12px;'
-                     f'padding:16px;text-align:center;margin:8px 0;opacity:0.5">'
-                     f'<div style="font-size:0.85rem;color:#4b5a7a;text-decoration:line-through">'
-                     f'{_news_data.get("event_name","?")} at {_nev_local} local — event passed</div>'
-                     f'</div>',
-                     unsafe_allow_html=True,
-                 )
-             elif _nev_impact in ("EXTREME", "HIGH"):
-                 st.markdown(
-                     f'<div style="background:#1a0000;border:2px solid #ef4444;border-radius:12px;'
-                     f'padding:28px;text-align:center;margin:16px 0">'
-                     f'<div style="font-size:2rem;font-weight:900;color:#ef4444;letter-spacing:0.06em;line-height:1">'
-                     f'DO NOT TRADE</div>'
-                     f'<div style="font-size:1.1rem;color:#e2e8f0;margin-top:12px;font-weight:600">'
-                     f'{_window}</div>'
-                     f'<div style="font-size:0.85rem;color:#94a3b8;margin-top:8px">'
-                     f'{_news_data.get("event_name","?")} ({_nev_impact} impact) · {_nev_local} local / {_nev_et} ET</div>'
-                     f'</div>',
-                     unsafe_allow_html=True,
-                 )
-             else:
-                 st.markdown(
-                     f'<div style="background:#1a1400;border:2px solid #f59e0b;border-radius:12px;'
-                     f'padding:28px;text-align:center;margin:16px 0">'
-                     f'<div style="font-size:2rem;font-weight:900;color:#f59e0b;letter-spacing:0.06em;line-height:1">'
-                     f'CAUTION</div>'
-                     f'<div style="font-size:1.1rem;color:#e2e8f0;margin-top:12px;font-weight:600">'
-                     f'{_window}</div>'
-                     f'<div style="font-size:0.85rem;color:#94a3b8;margin-top:8px">'
-                     f'{_news_data.get("event_name","?")} ({_nev_impact} impact) · {_nev_local} local / {_nev_et} ET</div>'
-                     f'</div>',
-                     unsafe_allow_html=True,
-                 )
-
-elif mr_enabled:
-    # ── Standalone Morning Report Card (no safe mode) — same style as safe mode ──
-    _mr_g    = morning_report.get("grade", "?")
-    _mr_mult = morning_report.get("multiplier", 1.0)
-    _mr_css  = morning_report.get("color", "white")
-    _mr_desc = morning_report.get("description", "")
-    _mr_sc   = morning_report.get("score", "?")
-    _mr_orig = daily_limit_r
-    _mr_eff  = effective_daily_limit_r
-    _limit_line = (
-        f"{_mr_orig}R × {_mr_mult*100:.0f}% = {_mr_eff:.2f}R"
-        if _mr_mult < 1.0 else f"{_mr_orig}R — full limit"
-    )
-    _LBL_NS = "font-size:0.58rem;color:#4b5a7a;text-transform:uppercase;letter-spacing:.1em;font-weight:600;text-align:center;width:100%"
-    _CARD_NS = ("background:#0e1220;border:1px solid #1a2238;border-top:3px solid {bc};"
-                "border-radius:10px;padding:16px 18px;"
-                "display:flex;flex-direction:column;align-items:center;text-align:center;gap:5px")
-
-    st.markdown("""
-    <div class="sec-hdr">
-      <div class="sec-line"></div>
-      <div class="sec-title">Phase 1</div>
-      <div class="sec-line"></div>
-    </div>
-    <div style="text-align:center;font-size:0.7rem;color:#4b5a7a;text-transform:uppercase;letter-spacing:.1em;font-weight:600;margin:-12px 0 16px">Human Performance Check-In</div>""", unsafe_allow_html=True)
-
-    if morning_report.get("completed"):
-        _p1ns_html = (
-            f'<div style="{_CARD_NS.format(bc="#3b82f6")}">'
-            f'<div class="checklist-badge-done" style="margin:0 auto">✓ Morning Report Card Complete</div>'
-            f'<div style="{_LBL_NS}">Grade</div>'
+            f'<div class="checklist-badge-done" style="margin:0 auto">✓ Tune-In Complete</div>'
+            f'<div style="{_LBL}">Calibration Grade</div>'
             f'<div style="font-size:2.2rem;font-weight:800;line-height:1" class="{_mr_css}">{_mr_g}</div>'
             f'<div style="font-size:0.75rem;color:#94a3b8">{_mr_desc}</div>'
-            f'<div style="{_LBL_NS};margin-top:4px">Score <span style="color:#e2e8f0;font-weight:700">{_mr_sc}/18</span>'
+            + (
+                f'<div style="font-size:1.5rem;font-weight:900;letter-spacing:0.08em;margin-top:8px" class="{_ss_css_d}">{_ss_done}</div>'
+                f'<div style="font-size:0.72rem;color:#94a3b8">{_ss_desc_d}</div>'
+                if _ss_done else ""
+            ) +
+            f'<div style="{_LBL};margin-top:4px">Score <span style="color:#e2e8f0;font-weight:700">{_mr_sc}/18</span>'
             f' · {_limit_line}</div>'
             f'</div>'
         )
-        st.markdown(_p1ns_html, unsafe_allow_html=True)
-        if _mr_g == "F":
-            st.markdown(
-                '<div class="mr-no-trade">MORNING GRADE: F — DO NOT TRADE TODAY · '
-                'Protect capital. Come back tomorrow.</div>', unsafe_allow_html=True)
-        st.markdown('<div style="margin-top:12px"></div>', unsafe_allow_html=True)
-        _ns_pad1, _ns_btn, _ns_pad2 = st.columns([2, 1, 2])
-        with _ns_btn:
-            if st.button("↩ Redo Check-In", key="redo_mr_ns", width="stretch"):
+        st.markdown(_p1_html, unsafe_allow_html=True)
+        _p1_rc, _ = st.columns([1, 5])
+        with _p1_rc:
+            if st.button("↩ Re-Tune", key="redo_p1_sm", use_container_width=True):
                 session["morning_report"] = {**_SESSION_DEFAULTS["morning_report"]}
+                checklist["phase1_complete"] = False
+                checklist["assets"] = []
+                session["checklist"] = checklist
                 _save_session(session)
                 st.rerun()
+        if _mr_g == "F":
+            st.markdown(
+                '<div class="mr-no-trade">STATIC — DO NOT TRADE TODAY · Protect capital.</div>',
+                unsafe_allow_html=True,
+            )
     else:
         st.markdown(
-            f'<div style="{_CARD_NS.format(bc="#3b82f6")}">'
-            f'<div class="checklist-badge" style="margin:0 auto">Phase 1 — Human Performance</div>'
-            f'<div style="font-size:0.88rem;color:#4b5a7a;margin-top:8px">○ Answer 6 questions to set your daily grade</div>'
+            f'<div style="{_CARD_STYLE.format(bc="#3b82f6")}">'
+            f'<div class="checklist-badge" style="margin:0 auto">TUNE — Pre-Session</div>'
+            f'<div style="font-size:0.88rem;color:#4b5a7a;margin-top:8px">○ Calibrate your state before the session opens</div>'
             f'</div>',
             unsafe_allow_html=True,
         )
         with st.form("morning_report_form"):
+            st.markdown(
+                '<div style="font-size:0.65rem;color:#4b5a7a;text-transform:uppercase;'
+                'letter-spacing:.1em;font-weight:700;margin-bottom:10px">Physical & Mental Calibration</div>',
+                unsafe_allow_html=True,
+            )
             qc1, qc2 = st.columns(2)
             for i, (qkey, qlabel, qopts, _) in enumerate(_MR_QUESTIONS):
                 with (qc1 if i < 3 else qc2):
                     st.selectbox(qlabel, qopts, key=f"mr_q_{qkey}")
-            if st.form_submit_button("Submit Phase 1 →", width="stretch"):
+            st.divider()
+            st.markdown(
+                '<div style="font-size:0.65rem;color:#4b5a7a;text-transform:uppercase;'
+                'letter-spacing:.1em;font-weight:700;margin-bottom:10px">State Self-Assessment</div>',
+                unsafe_allow_html=True,
+            )
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                _mental_opts  = [c[1] for c in _STATE_OPTIONS["mental"]["choices"]]
+                _mental_vals  = [c[0] for c in _STATE_OPTIONS["mental"]["choices"]]
+                _mental_sel   = st.selectbox(
+                    _STATE_OPTIONS["mental"]["label"],
+                    _mental_opts, key="mr_mental",
+                )
+            with sc2:
+                _tact_opts = [c[1] for c in _STATE_OPTIONS["tactical"]["choices"]]
+                _tact_vals = [c[0] for c in _STATE_OPTIONS["tactical"]["choices"]]
+                _tact_sel  = st.selectbox(
+                    _STATE_OPTIONS["tactical"]["label"],
+                    _tact_opts, key="mr_tactical",
+                )
+            if st.form_submit_button("Set My State →", use_container_width=True):
                 _total = 0
                 for qkey, _, qopts, qscores in _MR_QUESTIONS:
                     sel = st.session_state.get(f"mr_q_{qkey}", qopts[0])
                     idx = qopts.index(sel) if sel in qopts else 0
                     _total += qscores[idx]
                 _grade, _mult, _css, _desc = _mr_grade(_total)
+                # Map dropdown display text back to state keys
+                _mental_raw   = st.session_state.get("mr_mental", _mental_opts[0])
+                _tactical_raw = st.session_state.get("mr_tactical", _tact_opts[0])
+                _mental_key   = _mental_vals[_mental_opts.index(_mental_raw)] if _mental_raw in _mental_opts else "GRIND"
+                _tactical_key = _tact_vals[_tact_opts.index(_tactical_raw)] if _tactical_raw in _tact_opts else "GRIND"
+                _sess_state   = _derive_session_state(_grade, _mental_key, _tactical_key)
                 session["morning_report"] = {
                     "completed": True, "grade": _grade, "multiplier": _mult,
                     "score": _total, "description": _desc, "color": _css,
+                    "session_state":  _sess_state,
+                    "mental_state":   _mental_key,
+                    "tactical_state": _tactical_key,
                 }
+                _save_session(session)
+                st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)  # /decision-box TUNE
+
+    if cl_phase1:
+        # ── Asset management box ──
+        st.markdown('<div class="decision-box">', unsafe_allow_html=True)
+        st.markdown('<div class="decision-hdg">MAP — Assets in Focus Today</div>', unsafe_allow_html=True)
+        _all_instruments = ["SOL", "BTC", "ETH", "SUI", "MNQ", "MES"]
+        _used_names = [a["name"] for a in cl_assets]
+        _avail = [x for x in _all_instruments if x not in _used_names]
+        if _avail:
+            _ac1, _ac2, _ = st.columns([1.5, 1, 3])
+            with _ac1:
+                _new_asset_name = st.selectbox("Asset", _avail, key="new_asset_sel", label_visibility="collapsed")
+            with _ac2:
+                if st.button("+ Add Asset", key="add_asset_btn", use_container_width=True):
+                    cl_assets.append({**_ASSET_DEFAULTS, "name": _new_asset_name})
+                    checklist["assets"] = cl_assets
+                    session["checklist"] = checklist
+                    _save_session(session)
+                    st.rerun()
+
+        if not cl_assets:
+            st.markdown(
+                '<div class="checklist-lock" style="margin-top:8px">Add at least one asset to begin market analysis.</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown('</div>', unsafe_allow_html=True)  # /decision-box Assets
+
+        # ── Per-asset boxes ──
+        for _ai, _asset in enumerate(cl_assets):
+            _aname  = _asset["name"]
+            _a_p2c  = _asset.get("phase2_complete", False)
+            _a_p3c  = _asset.get("phase3_complete", False)
+            _a_ready = _a_p2c and _a_p3c
+            _status = "✓ Ready to Hunt" if _a_ready else ("MAP 3 pending" if _a_p2c else "MAP pending")
+            _border_col = "#22c55e" if _a_ready else ("#3b82f6" if _a_p2c else "#1e2a45")
+
+            st.markdown(
+                f'<div class="decision-box" style="border-color:{_border_col}">',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div class="decision-hdg">{_aname} — {_status}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            # Remove asset button
+            _rmcol, _ = st.columns([1, 5])
+            with _rmcol:
+                if st.button(f"✕ Remove {_aname}", key=f"rm_{_ai}", type="secondary"):
+                    cl_assets.pop(_ai)
+                    checklist["assets"] = cl_assets
+                    session["checklist"] = checklist
+                    _save_session(session)
+                    st.rerun()
+
+            # ── Phase 2 ──
+            st.markdown('<div class="decision-box" style="margin:8px 0">', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="decision-hdg">MAP · Market Context · {_aname}'
+                f'<br><span style="font-size:0.62rem;font-weight:500;letter-spacing:0;'
+                f'text-transform:none;color:#4b5a7a">Based on PREVIOUS day\'s profile</span></div>',
+                unsafe_allow_html=True,
+            )
+            if not _a_p2c:
+                with st.form(f"p2_{_ai}"):
+                    _fc1, _fc2 = st.columns(2)
+                    with _fc1:
+                        _p2_state = st.selectbox("Previous day type", _MARKET_STATES, key=f"p2s_{_ai}")
+                        _p2_d = st.radio("Volume 'D' profile on 30M?", ["Yes", "No"], key=f"p2d_{_ai}", horizontal=True)
+                        _p2_ib = st.radio("Initial Balance size", ["Large", "Small"], key=f"p2ib_{_ai}", horizontal=True)
+                    with _fc2:
+                        _p2_loc = st.radio("Price location vs prev day VA", _PRICE_LOCATIONS, key=f"p2l_{_ai}")
+                        if st.session_state.get(f"p2l_{_ai}", "") == "Outside VA":
+                            _p2_ret_raw = st.radio(
+                                "Price returned to VAH/VAL and resided 15–30 min?",
+                                ["Yes", "No"], key=f"p2r_{_ai}", horizontal=True,
+                            )
+                            _p2_ret = _p2_ret_raw == "Yes"
+                        else:
+                            _p2_ret = False
+
+                    # Live scenario preview
+                    _loc_now = st.session_state.get(f"p2l_{_ai}", _PRICE_LOCATIONS[0])
+                    _ret_now = st.session_state.get(f"p2r_{_ai}", "No") == "Yes" if _loc_now == "Outside VA" else False
+                    _sc_now, _st_now = _derive_scenario(_loc_now, _ret_now)
+                    _sc_col = "#22c55e" if _st_now == "Mean Reversion" else "#f97316"
+                    st.markdown(
+                        f'<div style="padding:8px 0 4px">'
+                        f'<span style="font-size:0.6rem;color:#4b5a7a;text-transform:uppercase;'
+                        f'letter-spacing:.08em;font-weight:600">→ Scenario {_sc_now} · Strategy: </span>'
+                        f'<span style="font-size:1.1rem;font-weight:900;color:{_sc_col}">{_st_now.upper()}</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # Schematics
+                    _ms_now = st.session_state.get(f"p2s_{_ai}", _MARKET_STATES[0])
+                    _sch1 = _schematic_for_market_state(_ms_now)
+                    _im_c1, _im_c2 = st.columns(2)
+                    if _sch1 and os.path.exists(_sch1):
+                        with _im_c1:
+                            st.image(_sch1, caption="Day type reference", use_container_width=True)
+                    if os.path.exists(_SCENARIO_SCHEMATIC):
+                        with _im_c2:
+                            st.image(_SCENARIO_SCHEMATIC, caption="Trade scenarios", use_container_width=True)
+
+                    if st.form_submit_button(f"Confirm Phase 2 for {_aname} →", use_container_width=True):
+                        _loc_s = st.session_state.get(f"p2l_{_ai}", _PRICE_LOCATIONS[0])
+                        _ret_s = st.session_state.get(f"p2r_{_ai}", "No") == "Yes" if _loc_s == "Outside VA" else False
+                        _sc_f, _st_f = _derive_scenario(_loc_s, _ret_s)
+                        cl_assets[_ai]["phase2"] = {
+                            "market_state":      st.session_state.get(f"p2s_{_ai}", _MARKET_STATES[0]),
+                            "d_profile":         st.session_state.get(f"p2d_{_ai}", "Yes"),
+                            "ib_size":           st.session_state.get(f"p2ib_{_ai}", "Large"),
+                            "price_location":    _loc_s,
+                            "outside_va_return": _ret_s,
+                            "scenario":          _sc_f,
+                            "strategy":          _st_f,
+                        }
+                        cl_assets[_ai]["phase2_complete"] = True
+                        checklist["assets"] = cl_assets
+                        session["checklist"] = checklist
+                        _save_session(session)
+                        st.rerun()
+            else:
+                _p2d = _asset.get("phase2", {})
+                _s_c = "#22c55e" if _p2d.get("strategy") == "Mean Reversion" else "#f97316"
+                st.markdown(
+                    f'<div class="checklist-badge-done" style="display:inline-block;margin:4px 0 6px">'
+                    f'✓ Phase 2 — {_aname}</div><br>'
+                    f'<span style="font-size:0.75rem;color:#94a3b8">'
+                    f'Day: <strong>{_p2d.get("market_state","?")}</strong> · '
+                    f'Loc: <strong>{_p2d.get("price_location","?")}</strong> · '
+                    f'Scenario <strong>{_p2d.get("scenario","?")}</strong> · '
+                    f'Strategy: <strong style="color:{_s_c}">{_p2d.get("strategy","?")}</strong>'
+                    f'</span>',
+                    unsafe_allow_html=True,
+                )
+                if st.button(f"↩ Redo Phase 2 — {_aname}", key=f"rdop2_{_ai}", type="secondary"):
+                    cl_assets[_ai]["phase2"] = {}
+                    cl_assets[_ai]["phase2_complete"] = False
+                    cl_assets[_ai]["phase3_complete"] = False
+                    checklist["assets"] = cl_assets
+                    session["checklist"] = checklist
+                    _save_session(session)
+                    st.rerun()
+
+            st.markdown('</div>', unsafe_allow_html=True)  # /decision-box MAP Context
+
+            # ── MAP · Key Levels ──
+            if _a_p2c:
+                st.markdown('<div class="decision-box" style="margin:8px 0">', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="decision-hdg">MAP · Key Levels · {_aname}</div>',
+                    unsafe_allow_html=True,
+                )
+                if not _a_p3c:
+                    with st.form(f"p3_{_ai}"):
+                        st.checkbox(f"Key S/R levels marked for {_aname}", key=f"p3sr_{_ai}")
+                        st.checkbox(f"Trend lines drawn for {_aname}", key=f"p3tl_{_ai}")
+                        st.checkbox(f"Price alerts set for {_aname}", key=f"p3al_{_ai}")
+
+                        # News events — shared, shown only until checked
+                        _news = checklist.get("news", {})
+                        if not _news.get("checked"):
+                            st.markdown('<hr style="border-color:#1a2238;margin:10px 0">', unsafe_allow_html=True)
+                            st.markdown(
+                                '<div style="font-size:0.62rem;color:#4b5a7a;text-transform:uppercase;'
+                                'letter-spacing:.1em;font-weight:600;margin-bottom:6px">'
+                                'Catalyst Check (shared — all assets)</div>',
+                                unsafe_allow_html=True,
+                            )
+                            st.radio("Major scheduled event today?", ["No", "Yes"], key=f"news_yn_{_ai}", horizontal=True)
+                            if st.session_state.get(f"news_yn_{_ai}", "No") == "Yes":
+                                _nc1, _nc2 = st.columns(2)
+                                with _nc1:
+                                    st.text_input("Event name", placeholder="e.g. CPI, FOMC", key=f"news_nm_{_ai}")
+                                with _nc2:
+                                    st.text_input("Time (EST)", placeholder="e.g. 08:30", key=f"news_tm_{_ai}")
+
+                        if st.form_submit_button(f"Lock MAP for {_aname} →", use_container_width=True):
+                            if not (st.session_state.get(f"p3sr_{_ai}") and
+                                    st.session_state.get(f"p3tl_{_ai}") and
+                                    st.session_state.get(f"p3al_{_ai}")):
+                                st.error("Check all three level items to proceed.")
+                            else:
+                                cl_assets[_ai]["phase3"] = {"sr_levels": True, "trend_lines": True, "price_alerts": True}
+                                cl_assets[_ai]["phase3_complete"] = True
+                                checklist["assets"] = cl_assets
+                                _news_now = checklist.get("news", {})
+                                if not _news_now.get("checked"):
+                                    _hn = st.session_state.get(f"news_yn_{_ai}", "No") == "Yes"
+                                    checklist["news"] = {
+                                        "checked":    True,
+                                        "has_news":   _hn,
+                                        "event_name": st.session_state.get(f"news_nm_{_ai}", "") if _hn else "",
+                                        "event_time": st.session_state.get(f"news_tm_{_ai}", "") if _hn else "",
+                                    }
+                                    cl_news_done = True
+                                session["checklist"] = checklist
+                                _save_session(session)
+                                st.rerun()
+                else:
+                    st.markdown(
+                        f'<div class="checklist-badge-done" style="display:inline-block;margin-bottom:6px">'
+                        f'✓ MAP Locked — {_aname}</div><br>'
+                        f'<span style="font-size:0.75rem;color:#94a3b8">✓ S/R levels · ✓ Trend lines · ✓ Price alerts</span>',
+                        unsafe_allow_html=True,
+                    )
+                    if st.button(f"↩ Re-Map {_aname}", key=f"rdop3_{_ai}", type="secondary"):
+                        cl_assets[_ai]["phase3_complete"] = False
+                        checklist["assets"] = cl_assets
+                        session["checklist"] = checklist
+                        _save_session(session)
+                        st.rerun()
+
+                st.markdown('</div>', unsafe_allow_html=True)  # /decision-box MAP Levels
+
+            st.markdown('</div>', unsafe_allow_html=True)  # /decision-box per-asset
+
+        # ── News event warning banner ──
+        _news_data = checklist.get("news", {})
+        if _news_data.get("has_news"):
+            st.markdown(
+                f'<div class="warn-banner">⚠️ News event today: <strong>{_news_data.get("event_name","?")}</strong>'
+                f' at <strong>{_news_data.get("event_time","?")}</strong> — trade cautiously around this window.</div>',
+                unsafe_allow_html=True,
+            )
+
+elif mr_enabled:
+    # ── Standalone Tune-In (no safe mode) ──
+    st.markdown("""
+    <div class="sec-hdr">
+      <div class="sec-line"></div>
+      <div class="sec-title">TUNE — Pre-Session Calibration</div>
+      <div class="sec-line"></div>
+    </div>""", unsafe_allow_html=True)
+
+    if not morning_report.get("completed"):
+        st.markdown(
+            '<div class="info-banner" style="margin-bottom:12px">'
+            'Calibrate your physical, mental, and tactical state before the session opens. '
+            'Your state determines your daily risk allowance.</div>',
+            unsafe_allow_html=True,
+        )
+        with st.form("morning_report_form"):
+            st.markdown(
+                '<div style="font-size:0.65rem;color:#4b5a7a;text-transform:uppercase;'
+                'letter-spacing:.1em;font-weight:700;margin-bottom:10px">Physical & Mental Calibration</div>',
+                unsafe_allow_html=True,
+            )
+            qc1, qc2 = st.columns(2)
+            for i, (qkey, qlabel, qopts, _) in enumerate(_MR_QUESTIONS):
+                with (qc1 if i < 3 else qc2):
+                    st.selectbox(qlabel, qopts, key=f"mr_q_{qkey}")
+            st.divider()
+            st.markdown(
+                '<div style="font-size:0.65rem;color:#4b5a7a;text-transform:uppercase;'
+                'letter-spacing:.1em;font-weight:700;margin-bottom:10px">State Self-Assessment</div>',
+                unsafe_allow_html=True,
+            )
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                _sa_mental_opts = [c[1] for c in _STATE_OPTIONS["mental"]["choices"]]
+                _sa_mental_vals = [c[0] for c in _STATE_OPTIONS["mental"]["choices"]]
+                _sa_mental_sel  = st.selectbox(_STATE_OPTIONS["mental"]["label"], _sa_mental_opts, key="mr_mental_sa")
+            with sc2:
+                _sa_tact_opts = [c[1] for c in _STATE_OPTIONS["tactical"]["choices"]]
+                _sa_tact_vals = [c[0] for c in _STATE_OPTIONS["tactical"]["choices"]]
+                _sa_tact_sel  = st.selectbox(_STATE_OPTIONS["tactical"]["label"], _sa_tact_opts, key="mr_tactical_sa")
+            _mr_submitted = st.form_submit_button("Set My State →", use_container_width=True)
+            if _mr_submitted:
+                _total = 0
+                for qkey, _, qopts, qscores in _MR_QUESTIONS:
+                    sel = st.session_state.get(f"mr_q_{qkey}", qopts[0])
+                    idx = qopts.index(sel) if sel in qopts else 0
+                    _total += qscores[idx]
+                _grade, _mult, _css, _desc = _mr_grade(_total)
+                _sa_m_raw = st.session_state.get("mr_mental_sa", _sa_mental_opts[0])
+                _sa_t_raw = st.session_state.get("mr_tactical_sa", _sa_tact_opts[0])
+                _sa_m_key = _sa_mental_vals[_sa_mental_opts.index(_sa_m_raw)] if _sa_m_raw in _sa_mental_opts else "GRIND"
+                _sa_t_key = _sa_tact_vals[_sa_tact_opts.index(_sa_t_raw)] if _sa_t_raw in _sa_tact_opts else "GRIND"
+                _sess_state = _derive_session_state(_grade, _sa_m_key, _sa_t_key)
+                session["morning_report"] = {
+                    "completed": True, "grade": _grade, "multiplier": _mult,
+                    "score": _total, "description": _desc, "color": _css,
+                    "session_state":  _sess_state,
+                    "mental_state":   _sa_m_key,
+                    "tactical_state": _sa_t_key,
+                }
+                _save_session(session)
+                st.rerun()
+    else:
+        _mr_g    = morning_report.get("grade", "?")
+        _mr_mult = morning_report.get("multiplier", 1.0)
+        _mr_css  = morning_report.get("color", "white")
+        _mr_desc = morning_report.get("description", "")
+        _mr_sc   = morning_report.get("score", "?")
+        _mr_eff  = effective_daily_limit_r
+        _mr_orig = daily_limit_r
+        _sa_ss   = morning_report.get("session_state", "")
+        _sa_sm   = _SESSION_STATE_META.get(_sa_ss, {})
+        _sa_scl  = _sa_sm.get("css", "white")
+        if _sa_ss == "STATIC":
+            st.markdown(
+                f'<div class="mr-no-trade">STATE: STATIC — DO NOT TRADE TODAY · '
+                f'Protect capital. Come back tomorrow.</div>', unsafe_allow_html=True)
+        elif _sa_ss == "GRIND":
+            st.markdown(
+                f'<div class="warn-banner">State: <strong>GRIND</strong> — '
+                f'{_mr_desc}. Daily limit adjusted to {_mr_eff:.2f}R ({_mr_mult*100:.0f}% of {_mr_orig}R).</div>',
+                unsafe_allow_html=True)
+        _limit_line = (
+            f"{_mr_orig}R × {_mr_mult*100:.0f}% = <strong>{_mr_eff:.2f}R effective limit</strong>"
+            if _mr_mult < 1.0 else f"<strong>{_mr_orig}R</strong> — full limit (no reduction)"
+        )
+        st.markdown(f"""
+        <div class="mr-card">
+          <div class="mr-badge">TUNE — Pre-Session Calibration</div>
+          <div style="display:flex;gap:32px;align-items:center;flex-wrap:wrap">
+            <div>
+              <div style="font-size:0.6rem;color:#4b5a7a;text-transform:uppercase;letter-spacing:.1em;font-weight:600">Calibration Grade</div>
+              <div style="font-size:3rem;font-weight:800;line-height:1;letter-spacing:-0.03em" class="{_mr_css}">{_mr_g}</div>
+              <div style="font-size:0.78rem;color:#94a3b8;margin-top:4px">{_mr_desc}</div>
+            </div>
+            <div>
+              <div style="font-size:0.6rem;color:#4b5a7a;text-transform:uppercase;letter-spacing:.1em;font-weight:600">Session State</div>
+              <div style="font-size:2.2rem;font-weight:900;letter-spacing:0.08em;line-height:1;margin-top:4px" class="{_sa_scl}">{_sa_ss}</div>
+              <div style="font-size:0.72rem;color:#94a3b8;margin-top:2px">
+                Mental: <strong>{morning_report.get("mental_state","—")}</strong> ·
+                Tactical: <strong>{morning_report.get("tactical_state","—")}</strong>
+              </div>
+            </div>
+            <div style="flex:1;min-width:200px">
+              <div style="font-size:0.6rem;color:#4b5a7a;text-transform:uppercase;letter-spacing:.1em;font-weight:600;margin-bottom:6px">Score & Limit</div>
+              <div style="font-size:0.88rem;color:#e2e8f0">Score: <strong>{_mr_sc}/18</strong></div>
+              <div style="font-size:0.88rem;color:#e2e8f0;margin-top:4px">{_limit_line}</div>
+            </div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+        _mr_redo_col, _ = st.columns([1, 4])
+        with _mr_redo_col:
+            if st.button("↩ Re-Tune", type="secondary", use_container_width=True):
+                session["morning_report"] = {**_SESSION_DEFAULTS["morning_report"]}
                 _save_session(session)
                 st.rerun()
 
@@ -2926,7 +2154,7 @@ if mode == "Secret Sauce":
                         unsafe_allow_html=True)
             col_act, col_skip = st.columns(2)
             with col_act:
-                if st.button("Activate Scaling", width="stretch"):
+                if st.button("Activate Scaling", use_container_width=True):
                     profit_r  = session_pnl_r
                     reserve   = round(profit_r / 3, 4)
                     remaining_for_units = profit_r - reserve
@@ -2938,7 +2166,7 @@ if mode == "Secret Sauce":
                     _save_session(session)
                     st.rerun()
             with col_skip:
-                if st.button("Keep Normal", width="stretch", type="secondary"):
+                if st.button("Keep Normal", use_container_width=True, type="secondary"):
                     fabio_state["consecutive_wins"] = 0
                     session["fabio_state"] = fabio_state
                     _save_session(session)
@@ -2949,21 +2177,21 @@ if mode == "Secret Sauce":
             st.markdown("**Unit 1 outcome:**")
             cu1, cu2, cu3 = st.columns(3)
             with cu1:
-                if st.button("Unit 1 TP", width="stretch"):
+                if st.button("Unit 1 TP", use_container_width=True):
                     fabio_state["unit1_status"] = "tp"
                     fabio_state["phase"] = 2
                     session["fabio_state"] = fabio_state
                     _save_session(session)
                     st.rerun()
             with cu2:
-                if st.button("Unit 1 BE", width="stretch", type="secondary"):
+                if st.button("Unit 1 BE", use_container_width=True, type="secondary"):
                     fabio_state["unit1_status"] = "be"
                     fabio_state["phase"] = 2
                     session["fabio_state"] = fabio_state
                     _save_session(session)
                     st.rerun()
             with cu3:
-                if st.button("Unit 1 SL", width="stretch", type="secondary"):
+                if st.button("Unit 1 SL", use_container_width=True, type="secondary"):
                     fabio_state["unit1_status"] = "sl"
                     fabio_state["phase"] = 0  # back to defensive
                     session["fabio_state"] = fabio_state
@@ -2974,76 +2202,31 @@ if mode == "Secret Sauce":
             st.markdown("**Unit 2 outcome:**")
             cu1, cu2, cu3 = st.columns(3)
             with cu1:
-                if st.button("Unit 2 TP", width="stretch"):
+                if st.button("Unit 2 TP", use_container_width=True):
                     fabio_state["unit2_status"] = "tp"
                     fabio_state["phase"] = 3
                     session["fabio_state"] = fabio_state
                     _save_session(session)
                     st.rerun()
             with cu2:
-                if st.button("Unit 2 BE", width="stretch", type="secondary"):
+                if st.button("Unit 2 BE", use_container_width=True, type="secondary"):
                     fabio_state["unit2_status"] = "be"
                     fabio_state["phase"] = 3
                     session["fabio_state"] = fabio_state
                     _save_session(session)
                     st.rerun()
             with cu3:
-                if st.button("Unit 2 SL", width="stretch", type="secondary"):
+                if st.button("Unit 2 SL", use_container_width=True, type="secondary"):
                     fabio_state["unit2_status"] = "sl"
                     fabio_state["phase"] = 3
                     session["fabio_state"] = fabio_state
                     _save_session(session)
                     st.rerun()
 
-# ─── TODAY'S CONTEXT SUMMARY (above active trading) ───────────────────────────
-_ctx_assets = checklist.get("assets", []) if safe_mode else []
-_ctx_confirmed = [a for a in _ctx_assets if a.get("phase2_complete")]
-if _ctx_confirmed:
-    _ctx_cards_html = '<div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin:0 0 20px">'
-    for _ca in _ctx_confirmed:
-        _ca_lbl = _ca.get("phase2", {}).get("context_label", "?")
-        _ca_cnf = _ca.get("phase2", {}).get("confidence", 0)
-        _ca_col = _context_color(_ca_lbl)
-        _ctx_cards_html += (
-            f'<div style="background:#0a0e18;border:2px solid {_ca_col};border-radius:10px;'
-            f'padding:14px 24px;text-align:center;min-width:140px;flex:1;max-width:220px">'
-            f'<div style="font-size:0.6rem;color:#4b5a7a;text-transform:uppercase;'
-            f'letter-spacing:.1em;font-weight:600;margin-bottom:4px">{_ca["name"]}</div>'
-            f'<div style="font-size:1.1rem;font-weight:900;color:{_ca_col};line-height:1.2">{_ca_lbl}</div>'
-            f'<div style="font-size:0.7rem;color:#94a3b8;margin-top:4px">{_ca_cnf}%</div>'
-            f'</div>'
-        )
-    _ctx_cards_html += '</div>'
-    st.markdown(_ctx_cards_html, unsafe_allow_html=True)
-
-# ─── IB TIMER ────────────────────────────────────────────────────────────────
-_ib = _ib_timer_info()
-if _ib["status"] != "market_closed":
-    _ib_pulse = ' ib-pulse' if _ib["status"] == "ib_active" else ''
-    _ib_bar_html = ""
-    if _ib["status"] == "ib_active":
-        _ib_pct = int(_ib["pct"] * 100)
-        _ib_bar_html = (
-            f'<div class="ib-bar-bg">'
-            f'<div class="ib-bar-fill" style="width:{_ib_pct}%;background:{_ib["color"]}"></div>'
-            f'</div>'
-        )
-    _ib_et_now = _now_et_minutes()
-    _ib_h, _ib_m = divmod(_ib_et_now, 60)
-    st.markdown(
-        f'<div class="ib-timer">'
-        f'<div class="ib-timer-dot{_ib_pulse}" style="background:{_ib["color"]}"></div>'
-        f'<div class="ib-timer-label" style="color:{_ib["color"]}">{_ib["label"]}</div>'
-        f'{_ib_bar_html}'
-        f'<div style="font-size:0.65rem;color:#4b5a7a">{_ib_h:02d}:{_ib_m:02d} ET</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
 # ─── ACTIVE TRADE ─────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="sec-hdr">
-  <div class="sec-line"></div><div class="sec-title">Active Trading</div><div class="sec-line"></div>
+  <div class="sec-line"></div><div class="sec-title">Active Trade</div><div class="sec-line"></div>
 </div>""", unsafe_allow_html=True)
 
 # EV bell curve helper — defined once, reused per trade
@@ -3140,34 +2323,34 @@ if active_trades:
                     f'<div class="pending-card-notice">⚠ {_pl} — confirm in the form below ↓</div>',
                     unsafe_allow_html=True,
                 )
-                if st.button("✕ Cancel", key=f"cancel_pend_{_ti}", type="secondary", width="stretch"):
+                if st.button("✕ Cancel", key=f"cancel_pend_{_ti}", type="secondary", use_container_width=True):
                     del st.session_state["_outcome_pending"]
                     st.rerun()
             else:
                 # Normal action buttons
                 _btn_cols = st.columns([2,2,2,2,2,1])
                 with _btn_cols[0]:
-                    if st.button("WIN",  key=f"win_{_ti}",  width="stretch", type="primary"):
+                    if st.button("WIN",  key=f"win_{_ti}",  use_container_width=True, type="primary"):
                         st.session_state["_outcome_pending"] = {"idx": _ti, "type": "win"}
                         st.rerun()
                 with _btn_cols[1]:
-                    if st.button("LOSS", key=f"loss_{_ti}", width="stretch"):
+                    if st.button("LOSS", key=f"loss_{_ti}", use_container_width=True):
                         st.session_state["_outcome_pending"] = {"idx": _ti, "type": "loss"}
                         st.rerun()
                 with _btn_cols[2]:
-                    if st.button("BE",   key=f"be_{_ti}",   width="stretch"):
+                    if st.button("BE",   key=f"be_{_ti}",   use_container_width=True):
                         st.session_state["_outcome_pending"] = {"idx": _ti, "type": "be"}
                         st.rerun()
                 with _btn_cols[3]:
-                    if st.button(f"+{prefs['addon_r']}R", key=f"add_{_ti}", width="stretch"):
+                    if st.button(f"+{prefs['addon_r']}R", key=f"add_{_ti}", use_container_width=True):
                         st.session_state["_outcome_pending"] = {"idx": _ti, "type": "addon"}
                         st.rerun()
                 with _btn_cols[4]:
-                    if st.button("Edit", key=f"edit_{_ti}", width="stretch"):
+                    if st.button("Edit", key=f"edit_{_ti}", use_container_width=True):
                         st.session_state["_outcome_pending"] = {"idx": _ti, "type": "edit"}
                         st.rerun()
                 with _btn_cols[5]:
-                    if st.button("✕", key=f"cancel_{_ti}", width="stretch", help="Cancel trade"):
+                    if st.button("✕", key=f"cancel_{_ti}", use_container_width=True, help="Cancel trade"):
                         active_trades.pop(_ti)
                         session["active_trades"] = active_trades
                         _save_session(session)
@@ -3215,7 +2398,7 @@ if _op and isinstance(_op, dict):
                     _nrr = st.number_input("R:R Target", min_value=0.1, value=float(_act_rr), step=0.1, format="%.2f")
                 with ec3:
                     _nt  = st.text_input("Note", value=_act.get("note", ""))
-                if st.form_submit_button("Save", width="stretch"):
+                if st.form_submit_button("Save", use_container_width=True):
                     active_trades[_op_idx]["grade"]     = _ng
                     active_trades[_op_idx]["implied_r"] = prefs["grades"][_ng]["implied_r"]
                     active_trades[_op_idx]["rr_target"] = _nrr
@@ -3239,10 +2422,10 @@ if _op and isinstance(_op, dict):
                 _win_csv_ex = st.selectbox("CSV exchange format (optional)",
                                            ["Auto-detect"] + _EXCHANGES, key=f"wcx_{_op_idx}")
                 _win_csv    = st.file_uploader("Verify via CSV (optional)", type=["csv"], key=f"wcsv_{_op_idx}")
-                if st.form_submit_button("Pull R from CSV", width="stretch") and _win_csv:
+                if st.form_submit_button("Pull R from CSV", use_container_width=True) and _win_csv:
                     _wp, _wf, _ws, _we = _parse_csv_last_close(_win_csv.read(), _win_csv_ex)
                     st.error(_we) if _we else st.success(f"CSV ({_ws}): {round(_wp/one_r,4):+.4f}R") if _wp else None
-                if st.form_submit_button("Confirm Win", width="stretch"):
+                if st.form_submit_button("Confirm Win", use_container_width=True):
                     _cr = _risk_score(_act["rr_target"], len(_act.get("add_ons",[])), _act.get("grade","AA"))
                     _trade = {**_act, "outcome": "Win", "close_time": datetime.now().strftime("%H:%M:%S"),
                               "risk_tool": rr_achieved, "actual_r": actual_r, "risk_score_close": _cr}
@@ -3269,13 +2452,13 @@ if _op and isinstance(_op, dict):
                     manual_r = st.number_input("Actual R (negative)", max_value=0.0,
                                                value=float(round(-_act_risk_r, 4)), step=0.01, format="%.4f")
                 with lc2:
-                    pull_okx = st.form_submit_button(_pull_lbl, width="stretch")
+                    pull_okx = st.form_submit_button(_pull_lbl, use_container_width=True)
                 with lc3:
-                    confirm  = st.form_submit_button("Confirm Loss", width="stretch")
+                    confirm  = st.form_submit_button("Confirm Loss", use_container_width=True)
                 st.markdown("---")
                 _csv_ex_h = st.selectbox("CSV exchange format", ["Auto-detect"] + _EXCHANGES, key=f"lcx_{_op_idx}")
                 _csv_file = st.file_uploader("Or upload exchange CSV", type=["csv"], key=f"lcsv_{_op_idx}")
-                _csv_pull = st.form_submit_button("Parse CSV", width="stretch")
+                _csv_pull = st.form_submit_button("Parse CSV", use_container_width=True)
 
                 def _close_loss(ar, extra=None):
                     _cr2 = _risk_score(_act["rr_target"], len(_act.get("add_ons",[])), _act.get("grade","AA"))
@@ -3323,7 +2506,7 @@ if _op and isinstance(_op, dict):
         elif _op_type == "be":
             with st.form(f"be_form_{_op_idx}"):
                 st.markdown(f"**Log {_act_inst} at 0R?**")
-                if st.form_submit_button("Confirm Break Even", width="stretch"):
+                if st.form_submit_button("Confirm Break Even", use_container_width=True):
                     _cr = _risk_score(_act["rr_target"], len(_act.get("add_ons",[])), _act.get("grade","AA"))
                     _t3 = {**_act, "outcome": "BE", "close_time": datetime.now().strftime("%H:%M:%S"),
                            "risk_tool": 0.0, "actual_r": 0.0, "risk_score_close": _cr}
@@ -3341,7 +2524,7 @@ if _op and isinstance(_op, dict):
                 st.markdown(f"**Add {prefs['addon_r']}R to {_act_inst}?**")
                 new_rr = st.number_input("Update R:R target", min_value=0.1,
                                          value=float(_act_rr), step=0.1, format="%.1f")
-                if st.form_submit_button("Confirm Add-on", width="stretch"):
+                if st.form_submit_button("Confirm Add-on", use_container_width=True):
                     active_trades[_op_idx]["add_ons"].append({
                         "r":    prefs["addon_r"],
                         "time": datetime.now().strftime("%H:%M:%S"),
@@ -3360,65 +2543,21 @@ if not limit_hit:
             unsafe_allow_html=True,
         )
     else:
-        # ── News hard gate — block trade entry during high-impact events ──
-        _news_blocked = False
-        _ngate = checklist.get("news", {}) if safe_mode else {}
-        if _ngate.get("has_news") and _ngate.get("event_impact") in ("EXTREME", "HIGH"):
-            _ngate_et = _ngate.get("event_time", "")
-            _ngate_local = _et_to_local(_ngate_et, prefs.get("user_tz_offset", 1))
-            _news_status = _news_window_status(_ngate_local)
-            if _news_status == "active":
-                _news_blocked = True
-
-        if _news_blocked:
-            st.markdown(
-                '<div style="background:#1a0000;border:2px solid #ef4444;border-radius:12px;'
-                'padding:24px;text-align:center;margin:8px 0">'
-                '<div style="font-size:1.5rem;font-weight:900;color:#ef4444">TRADE ENTRY BLOCKED</div>'
-                '<div style="font-size:0.85rem;color:#94a3b8;margin-top:8px">'
-                f'News event window active — {_ngate.get("event_name","?")} at {_ngate_local} local. '
-                'Wait 30 min after event.</div></div>',
-                unsafe_allow_html=True,
-            )
-
         # Quick-launch buttons — must select before form unlocks
-        _sel_grade = st.session_state.get("_quick_grade", "") if not _news_blocked else ""
-        if not _news_blocked:
-            # Grade gating: restrict grades based on derived context
-            _ctx_structs = set()
-            for _ga in checklist.get("assets", []):
-                if _ga.get("phase2_complete"):
-                    _ctx_structs.add(_ga.get("phase2", {}).get("structure", "MR"))
-            _show_mr = not _ctx_structs or "MR" in _ctx_structs or "ID" in _ctx_structs
-            _show_bo = not _ctx_structs or "TR" in _ctx_structs or "ID" in _ctx_structs
-
-            qb1, qb2 = st.columns(2)
-            with qb1:
-                if _show_mr:
-                    _mr_type = "primary" if _sel_grade == "AAA" else "secondary"
-                    if st.button("MEAN REVERSION", width="stretch", type=_mr_type,
-                                 help="AAA setup — " + str(prefs["grades"]["AAA"]["implied_r"]) + "R implied risk"):
-                        st.session_state["_quick_grade"] = "AAA"
-                        st.rerun()
-                else:
-                    st.markdown(
-                        '<div style="padding:8px;text-align:center;color:#4b5a7a;font-size:0.75rem">'
-                        'MR not available — all assets trending</div>',
-                        unsafe_allow_html=True,
-                    )
-            with qb2:
-                if _show_bo:
-                    _bo_type = "primary" if _sel_grade == "AA" else "secondary"
-                    if st.button("BREAKOUT", width="stretch", type=_bo_type,
-                                 help="AA setup — " + str(prefs["grades"]["AA"]["implied_r"]) + "R implied risk"):
-                        st.session_state["_quick_grade"] = "AA"
-                        st.rerun()
-                else:
-                    st.markdown(
-                        '<div style="padding:8px;text-align:center;color:#4b5a7a;font-size:0.75rem">'
-                        'BO not available — all assets mean reverting</div>',
-                        unsafe_allow_html=True,
-                    )
+        _sel_grade = st.session_state.get("_quick_grade", "")
+        qb1, qb2 = st.columns(2)
+        with qb1:
+            _mr_type = "primary" if _sel_grade == "AAA" else "secondary"
+            if st.button("MEAN REVERSION", use_container_width=True, type=_mr_type,
+                         help="AAA setup — " + str(prefs["grades"]["AAA"]["implied_r"]) + "R implied risk"):
+                st.session_state["_quick_grade"] = "AAA"
+                st.rerun()
+        with qb2:
+            _bo_type = "primary" if _sel_grade == "AA" else "secondary"
+            if st.button("BREAKOUT", use_container_width=True, type=_bo_type,
+                         help="AA setup — " + str(prefs["grades"]["AA"]["implied_r"]) + "R implied risk"):
+                st.session_state["_quick_grade"] = "AA"
+                st.rerun()
 
         # Grade gate — must select MEAN REVERSION or BREAKOUT first
         _pf = st.session_state.get("_ws_prefill") or {}
@@ -3503,7 +2642,7 @@ if not limit_hit:
                         )
                         _p4c1, _p4c2 = st.columns(2)
                         with _p4c1:
-                            _p4_level = st.radio("At a valid Support / Resistance level?", ["Yes", "No — not yet"], key="p4_lvl")
+                            _p4_level = st.radio("At a valid S/R level?", ["Yes", "No — not yet"], key="p4_lvl")
                         with _p4c2:
                             _p4_fp    = st.radio("Footprint confirms?", ["Yes", "No — wait"], key="p4_fp")
                         if _p4_strat == "Breakout":
@@ -3512,7 +2651,7 @@ if not limit_hit:
                         else:
                             _p4_bo = "N/A"
 
-                if st.form_submit_button("Enter Trade", width="stretch"):
+                if st.form_submit_button("Enter Trade", use_container_width=True):
                     # Validate Phase 4 if safe mode
                     _block = None
                     if safe_mode:
@@ -3520,7 +2659,7 @@ if not limit_hit:
                         _fp_sub   = st.session_state.get("p4_fp", "Yes")
                         _bo_sub   = st.session_state.get("p4_bo", "N/A")
                         if _inst_sub.startswith("No"):
-                            _block = "Not at a valid Support / Resistance level — wait for better location."
+                            _block = "Not at a valid S/R level — wait for better location."
                         elif _fp_sub.startswith("No"):
                             _block = "Footprint doesn't confirm — wait."
                         elif _bo_sub == "No — false breakout":
@@ -3530,7 +2669,6 @@ if not limit_hit:
                     else:
                         _implied_r   = prefs["grades"][chosen_grade]["implied_r"]
                         _entry_risk  = _risk_score(rr_target, 0, chosen_grade)
-                        _trade_ctx = _get_asset_context(instrument, checklist.get("assets", []))
                         _new_trade   = {
                             "id":               len(completed) + len(active_trades) + 1,
                             "open_date":        str(date.today()),
@@ -3544,7 +2682,6 @@ if not limit_hit:
                             "stop_price":       stop_price  if stop_price  > 0 else None,
                             "add_ons":          [],
                             "note":             note,
-                            "context":          _trade_ctx,
                         }
                         st.session_state.pop("_quick_grade", None)
                         st.session_state.pop("_ws_prefill", None)
@@ -3553,60 +2690,31 @@ if not limit_hit:
                         _save_session(session)
                         st.rerun()
 
-# ─── SYNCED EXCHANGE DATA ─────────────────────────────────────────────────────
-_sync_orders = st.session_state.get("_sync_orders", [])
-_sync_positions = st.session_state.get("_sync_positions", [])
-_sync_ts = st.session_state.get("_sync_ts", "")
-
-if _sync_positions:
+# ─── CLEAR PHASE — shown when session has trades and no active positions ──────
+if _loop_clear:
+    _clear_total_r = session_pnl_r
+    _clear_wins    = sum(1 for t in completed if t.get("actual_r", 0) > 0)
+    _clear_losses  = sum(1 for t in completed if t.get("actual_r", 0) < 0)
+    _clear_color   = "#22c55e" if _clear_total_r > 0 else ("#ef4444" if _clear_total_r < 0 else "#94a3b8")
+    _clear_sign    = "+" if _clear_total_r > 0 else ""
     st.markdown(f"""
     <div class="sec-hdr">
-      <div class="sec-line"></div><div class="sec-title">Open Positions</div><div class="sec-line"></div>
+      <div class="sec-line"></div><div class="sec-title">CLEAR — Session Complete</div><div class="sec-line"></div>
     </div>
-    <div style="text-align:center;font-size:0.65rem;color:#4b5a7a;margin:-8px 0 10px">
-    Last sync: {_sync_ts}</div>""", unsafe_allow_html=True)
-    _pos_rows = []
-    for _sp in _sync_positions:
-        _inst = _sp["instId"].replace("-SWAP", "").replace("-", "/")
-        _side_col = "#22c55e" if _sp["side"] == "long" else "#ef4444"
-        _upl_col = "#22c55e" if _sp["upl"] >= 0 else "#ef4444"
-        _pos_rows.append({
-            "Instrument": _inst,
-            "Side": _sp["side"].upper(),
-            "Size": _sp["sz"],
-            "Entry": _sp["avgPx"],
-            "Leverage": f"{_sp['lever']}x",
-            "Unrealized P&L": f"${_sp['upl']:+.2f}",
-        })
-    st.dataframe(_pos_rows, width="stretch", hide_index=True)
-
-if _sync_orders:
-    st.markdown(f"""
-    <div class="sec-hdr">
-      <div class="sec-line"></div><div class="sec-title">Today's Exchange Fills</div><div class="sec-line"></div>
-    </div>
-    <div style="text-align:center;font-size:0.65rem;color:#4b5a7a;margin:-8px 0 10px">
-    {len(_sync_orders)} fills · Last sync: {_sync_ts}</div>""", unsafe_allow_html=True)
-    _fill_rows = []
-    for _so in sorted(_sync_orders, key=lambda x: x.get("fillTs", 0), reverse=True):
-        _inst = _so["instId"].replace("-SWAP", "").replace("-", "/")
-        _net = round(_so["pnl"] + _so["fee"], 4)
-        _fill_rows.append({
-            "Instrument": _inst,
-            "Side": _so["side"].upper(),
-            "Size": _so["sz"],
-            "Avg Price": _so["avgPx"],
-            "P&L": f"${_so['pnl']:+.4f}",
-            "Fee": f"${_so['fee']:.4f}",
-            "Net": f"${_net:+.4f}",
-            "Type": _so["ordType"],
-        })
-    st.dataframe(_fill_rows, width="stretch", hide_index=True)
+    <div class="state-badge state-badge-{'prime' if _clear_total_r > 0 else ('static' if _clear_total_r < 0 else 'grind')}"
+         style="margin-bottom:18px">
+      <div class="state-label" style="color:{_clear_color}">{_clear_sign}{_clear_total_r:.2f}R</div>
+      <div class="state-meta">
+        <div class="state-meta-name">Session Result</div>
+        <div class="state-meta-desc">{_clear_wins}W · {_clear_losses}L · {len(completed)} trade{'s' if len(completed)!=1 else ''}</div>
+        <div style="margin-top:6px;font-size:0.72rem;color:#4b5a7a">Let go of the outcome. Reset for tomorrow.</div>
+      </div>
+    </div>""", unsafe_allow_html=True)
 
 # ─── SESSION LOG ──────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="sec-hdr">
-  <div class="sec-line"></div><div class="sec-title">Session Log</div><div class="sec-line"></div>
+  <div class="sec-line"></div><div class="sec-title">HUNT Log — Today's Trades</div><div class="sec-line"></div>
 </div>""", unsafe_allow_html=True)
 
 if not completed:
@@ -3657,7 +2765,7 @@ else:
         .set_properties(**{"background-color": "#0e1220", "color": "#e2e8f0",
                            "border-color": "#1a2238"})
     )
-    st.dataframe(styled, width="stretch", hide_index=True)
+    st.dataframe(styled, use_container_width=True, hide_index=True)
 
     # ── Delete a session trade ──
     with st.expander("Delete a trade from this session", expanded=False):
@@ -3757,7 +2865,7 @@ else:
                 .set_properties(**{"background-color": "#0e1220", "color": "#e2e8f0",
                                    "border-color": "#1a2238"})
             )
-            st.dataframe(_dstyled, width="stretch", hide_index=True)
+            st.dataframe(_dstyled, use_container_width=True, hide_index=True)
 
             # Delete a trade from this day
             _hdel_opts = [
@@ -3787,7 +2895,7 @@ else:
         data=_csv_bytes,
         file_name=f"trading_history_{date.today()}.csv",
         mime="text/csv",
-        width="stretch",
+        use_container_width=True,
     )
 
 st.markdown("<div style='height:60px'></div>", unsafe_allow_html=True)
